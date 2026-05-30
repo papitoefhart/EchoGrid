@@ -1,0 +1,6 @@
+build/
+JUCE/
+*.pkg
+*.zip
+.DS_Store
+compile_commands.json

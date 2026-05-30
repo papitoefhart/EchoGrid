@@ -1,0 +1,146 @@
+name: Build EchoGrid
+
+# Runs on every push to main, and on every GitHub Release.
+# Artifacts (macOS PKG + Windows VST3 zip) are automatically
+# attached to the release when triggered via "Create release" on GitHub.
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [created]
+
+env:
+  JUCE_VERSION: "8.0.12"
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ── macOS: builds AU + VST3, packages into a .pkg installer ──────────────
+  build-macos:
+    name: macOS (AU + VST3)
+    runs-on: macos-14          # Apple Silicon runner
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # Cache JUCE so repeat runs don't re-download 500 MB every time
+      - name: Cache JUCE
+        id: cache-juce
+        uses: actions/cache@v4
+        with:
+          path: JUCE
+          key: juce-${{ env.JUCE_VERSION }}
+
+      - name: Fetch JUCE (if not cached)
+        if: steps.cache-juce.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch ${{ env.JUCE_VERSION }} \
+            https://github.com/juce-framework/JUCE.git JUCE
+
+      - name: Configure (Release, CI mode)
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DECHOGRID_CI=ON
+
+      - name: Build AU + VST3
+        run: |
+          cmake --build build \
+            --config Release \
+            --target EchoGrid_AU EchoGrid_VST3 \
+            -j4
+
+      # Create a single .pkg that installs both plugins to /Library/…
+      - name: Package macOS installer
+        run: |
+          STAGING="$RUNNER_TEMP/echogrid-staging"
+          mkdir -p "$STAGING/Library/Audio/Plug-Ins/Components"
+          mkdir -p "$STAGING/Library/Audio/Plug-Ins/VST3"
+
+          cp -R build/EchoGrid_artefacts/Release/AU/EchoGrid.component \
+                "$STAGING/Library/Audio/Plug-Ins/Components/"
+          cp -R build/EchoGrid_artefacts/Release/VST3/EchoGrid.vst3 \
+                "$STAGING/Library/Audio/Plug-Ins/VST3/"
+
+          pkgbuild \
+            --root "$STAGING" \
+            --identifier com.johannesloeffler.echogrid \
+            --version 1.0.0 \
+            --ownership recommended \
+            EchoGrid-macOS.pkg
+
+      - name: Upload macOS installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoGrid-macOS
+          path: EchoGrid-macOS.pkg
+          retention-days: 30
+
+  # ── Windows: builds VST3 only (AU is Apple-only) ─────────────────────────
+  build-windows:
+    name: Windows (VST3)
+    runs-on: windows-latest    # Visual Studio 2022, x64
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Cache JUCE
+        id: cache-juce
+        uses: actions/cache@v4
+        with:
+          path: JUCE
+          key: juce-${{ env.JUCE_VERSION }}
+
+      - name: Fetch JUCE (if not cached)
+        if: steps.cache-juce.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch ${{ env.JUCE_VERSION }} `
+            https://github.com/juce-framework/JUCE.git JUCE
+        shell: pwsh
+
+      - name: Configure (Release, CI mode)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DECHOGRID_CI=ON -A x64
+
+      - name: Build VST3
+        run: |
+          cmake --build build --config Release --target EchoGrid_VST3
+
+      # Locate the .vst3 bundle and zip it for distribution
+      - name: Package Windows VST3
+        shell: pwsh
+        run: |
+          $vst3 = Get-ChildItem -Path build -Recurse -Filter "EchoGrid.vst3" `
+                  | Select-Object -First 1 -ExpandProperty FullName
+          Write-Host "Found VST3 at: $vst3"
+          Compress-Archive -Path $vst3 -DestinationPath EchoGrid-Windows-VST3.zip
+
+      - name: Upload Windows VST3 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EchoGrid-Windows-VST3
+          path: EchoGrid-Windows-VST3.zip
+          retention-days: 30
+
+  # ── Attach both artifacts to the GitHub Release (runs only on release) ────
+  attach-to-release:
+    name: Attach to GitHub Release
+    needs: [build-macos, build-windows]
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Attach files to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/EchoGrid-macOS/EchoGrid-macOS.pkg
+            dist/EchoGrid-Windows-VST3/EchoGrid-Windows-VST3.zip
