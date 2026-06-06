@@ -21,18 +21,20 @@ struct EchoNode
     //--- variability ---
     float probability   = 1.0f;   // 0.0–1.0 chance this echo fires each bar
 
+    //--- saturation: 0 = clean, 1 = heavy tape drive ---
+    float saturation    = 0.0f;
+
     //--- state ---
     bool  active        = true;
     bool  reverse       = false;
 
     bool operator==(const EchoNode& o) const
     {
-        // Bit-exact comparison — safe here because we only ever store values
-        // that were set directly (no arithmetic rounding between store and compare)
         return std::memcmp(&positionBeats, &o.positionBeats, sizeof(float)) == 0
             && std::memcmp(&gain,          &o.gain,          sizeof(float)) == 0
             && std::memcmp(&pan,           &o.pan,           sizeof(float)) == 0
             && std::memcmp(&probability,   &o.probability,   sizeof(float)) == 0
+            && std::memcmp(&saturation,    &o.saturation,    sizeof(float)) == 0
             && active == o.active && reverse == o.reverse;
     }
     bool operator!=(const EchoNode& o) const { return !(*this == o); }
@@ -74,34 +76,30 @@ public:
     std::vector<EchoNode> nodes;
     float                 analogAmount    = 0.0f;   // 0 = precise, 1 = analog
     float                 gridLengthBeats = 4.0f;   // total grid length in beats
-    int                   subdivisions    = 16;     // snap subdivisions across the grid
+    float                 snapStepBeats   = 0.25f;  // musical snap step in beats (0.25 = 1/16 note)
+
+    //--- filter & mix (editor-writable, audio-thread-read) ---
+    float lpCutoffHz  = 20000.0f;  // low-pass  cutoff  (Hz)
+    float hpCutoffHz  = 20.0f;     // high-pass cutoff  (Hz)
+    bool  filterDry   = false;     // also apply filter to dry signal
 
 private:
-    //--- per-node DSP state (audio thread only) ---
+    //--- per-node DSP state (audio thread only).  Reverse needs no per-node
+    //    state any more: it's a stateless function of the transport position. ---
     struct NodeState
     {
         bool  fired        = true;
         float gainEnvelope = 1.0f;
         float timingJitter = 0.0f;
-
-        //--- true reverse double-buffer ---
-        //    fill one block while playing the previous block in reverse;
-        //    swap when the fill block is complete (= one D-sample period)
-        std::vector<float> revL[2], revR[2];
-        int  revFillPos = 0;    // write cursor in the fill buffer
-        int  revPlayBuf = 0;    // index (0/1) of the buffer being played
-        bool revReady   = false; // false until the first buffer is fully recorded
     };
 
     void rerollNodes();
-    void initReverseBuffer(NodeState&);
+    void updateFilterCoefficients();
 
-    //--- NodeState pool: pre-allocated to kMaxNodes in prepareToPlay so that
-    //    rerollNodes() can safely be called from the audio thread without any
-    //    heap allocation.  Only indices 0..nodes.size()-1 are active at runtime.
+    //--- NodeState pool ---
     static constexpr int     kMaxNodes          = 32;
-    std::vector<NodeState>   nodeStates;         // always kMaxNodes entries after prepareToPlay
-    int                      lastNodeCount       = 0;  // nodes.size() at last reroll
+    std::vector<NodeState>   nodeStates;
+    int                      lastNodeCount       = 0;
     juce::Random             rng;
     int                      samplesUntilReroll  = 0;
 
@@ -109,6 +107,18 @@ private:
     juce::AudioBuffer<float> delayBuffer;
     int    writePosition     = 0;
     double currentSampleRate = 44100.0;
+
+    //--- free-running song-position counter (beats), used to grid-lock reverse
+    //    windows when the host provides no play position. ---
+    double fallbackBeats     = 0.0;
+
+    //--- finite tail length (seconds) for the host: longest active echo delay,
+    //    refreshed each block.  Written on the audio thread, read by the host. ---
+    std::atomic<double> tailSeconds { 2.0 };
+
+    //--- LP/HP filters: [0]=L [1]=R; wet always filtered, dry filtered if filterDry ---
+    juce::IIRFilter lpWet[2], hpWet[2], lpDry[2], hpDry[2];
+    float lastLpHz = -1.0f, lastHpHz = -1.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EchoGridProcessor)
 };

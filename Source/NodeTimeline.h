@@ -19,7 +19,10 @@ public:
     int getSelectedIndex() const { return selectedIndex; }
     const std::vector<int>& getMultiSelection() const { return multiSelection; }
     void clearSelection() { multiSelection.clear(); selectedIndex = -1; repaint(); }
-    void setPanEditMode(bool active) { panEditMode = active; repaint(); }
+
+    //--- overlay edit mode ---
+    enum class EditMode { None, Pan, Sat };
+    void setEditMode(EditMode m) { editMode = m; repaint(); }
 
     //--- undo helpers (also called by NodeInspector and PluginEditor) ---
     void captureSnapshot();
@@ -30,15 +33,14 @@ public:
     {
         std::vector<EchoNode> nodes;
         DryNode dry;
-        float   gridLengthBeats = 4.0f;  // included so grid-length changes are fully undoable
-        int     subdivisions    = 16;
+        float   gridLengthBeats = 4.0f;
+        float   snapStepBeats   = 0.25f;
     };
 
 private:
     EchoGridProcessor& processor;
     juce::UndoManager& undoManager;
 
-    //--- undo snapshot ---
     EditorState snapshotBefore;
 
     //--- coordinate conversion ---
@@ -48,36 +50,34 @@ private:
     float yToGain(float y)     const;
     float snapBeat(float beat) const;
 
-    //--- returns echo node index under point, or -1 ---
-    int echoNodeAt(juce::Point<float>) const;
-    bool dryNodeAt(juce::Point<float>) const;
+    int  echoNodeAt(juce::Point<float>) const;
+    bool dryNodeAt(juce::Point<float>)  const;
 
     //--- line draw (Option + drag) ---
     void placeLineBetween(juce::Point<float> from, juce::Point<float> to);
-    bool              drawingLine = false;
+    bool               drawingLine = false;
     juce::Point<float> lastLinePos;
 
     //--- drag state ---
-    //    dragIndex == -2 → dragging the dry node
-    //    dragIndex == -1 → no drag
-    //    dragIndex >= 0  → dragging echo node at that index
     int   dragIndex     = -1;
     float dragStartBeat = 0.0f;
-    juce::Point<float> dragStartPos;   // anchor for beat drag; Y is set but only X is used
+    juce::Point<float> dragStartPos;
 
-    //--- selection: selectedIndex = inspector target; multiSelection = all selected ---
-    int              selectedIndex       = -1;
+    //--- selection ---
+    int              selectedIndex  = -1;
     std::vector<int> multiSelection;
-    bool             shiftSelecting      = false;
+    bool             shiftSelecting = false;
     juce::Point<float> shiftSelectStart, shiftSelectCurrent;
     std::vector<float> multiGainAtDragStart;
 
-    //--- pan edit mode ---
-    bool  panEditMode       = false;
-    int   panDragIdx        = -1;
-    float panDragStartPan   = 0.0f;
+    //--- overlay edit mode ---
+    EditMode editMode = EditMode::None;
+
+    //--- pan edit state ---
+    int   panDragIdx      = -1;
+    float panDragStartPan = 0.0f;
     std::vector<float> multiPanAtDragStart;
-    bool               panLineDrawing  = false;
+    bool               panLineDrawing = false;
     juce::Point<float> panLastLinePos;
 
     float panToY(float pan) const;
@@ -85,16 +85,34 @@ private:
     int   panNodeAt(juce::Point<float>) const;
     void  placePanLineBetween(juce::Point<float> from, juce::Point<float> to);
 
-    //--- probability scroll tooltip ---
+    //--- saturation edit state ---
+    int   satDragIdx      = -1;
+    float satDragStartSat = 0.0f;
+    std::vector<float> multiSatAtDragStart;
+    bool               satLineDrawing = false;
+    juce::Point<float> satLastLinePos;
+
+    float satToY(float sat) const;
+    float yToSat(float y)   const;
+    int   satNodeAt(juce::Point<float>) const;
+    void  placeSatLineBetween(juce::Point<float> from, juce::Point<float> to);
+
+    //--- probability tooltip ---
     int  probTooltipIdx  = -1;
     bool showProbTooltip = false;
+
+    //--- probability scroll: a run of wheel notches is coalesced into a single
+    //    undo step, flushed when the gesture ends (timer fires) or another edit
+    //    begins.  true while a scroll gesture is in progress. ---
+    bool probGestureActive = false;
+    void flushProbGesture();
 
     void timerCallback() override;
     void updateCursor(juce::Point<float> pos, bool altDown);
 
     static constexpr float kNodeRadius = 8.0f;
-    static constexpr float kPadX       = 24.0f; // left/right margin so nodes don't clip edges
-    static constexpr float kPadY       = 24.0f; // top/bottom margin
+    static constexpr float kPadX       = 24.0f;
+    static constexpr float kPadY       = 24.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NodeTimeline)
 };

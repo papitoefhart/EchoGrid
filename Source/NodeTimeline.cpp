@@ -12,6 +12,12 @@ static juce::Colour panToColour(float pan)
                       : centre.interpolatedWith(right,  pan);
 }
 
+static juce::Colour satToColour(float sat)
+{
+    //--- neutral cream at 0 → deep orange-red at 1 (tape warmth palette) ---
+    return juce::Colour(0xffe8d8c0).interpolatedWith(juce::Colour(0xffff4400), sat);
+}
+
 //==============================================================================
 namespace {
 struct NodeAction : public juce::UndoableAction
@@ -29,7 +35,7 @@ struct NodeAction : public juce::UndoableAction
         proc.nodes           = after.nodes;
         proc.dry             = after.dry;
         proc.gridLengthBeats = after.gridLengthBeats;
-        proc.subdivisions    = after.subdivisions;
+        proc.snapStepBeats   = after.snapStepBeats;
         return true;
     }
 
@@ -39,7 +45,7 @@ struct NodeAction : public juce::UndoableAction
         proc.nodes           = before.nodes;
         proc.dry             = before.dry;
         proc.gridLengthBeats = before.gridLengthBeats;
-        proc.subdivisions    = before.subdivisions;
+        proc.snapStepBeats   = before.snapStepBeats;
         return true;
     }
 };
@@ -56,19 +62,19 @@ void NodeTimeline::captureSnapshot()
     snapshotBefore.nodes           = processor.nodes;
     snapshotBefore.dry             = processor.dry;
     snapshotBefore.gridLengthBeats = processor.gridLengthBeats;
-    snapshotBefore.subdivisions    = processor.subdivisions;
+    snapshotBefore.snapStepBeats   = processor.snapStepBeats;
 }
 
 void NodeTimeline::pushUndoIfChanged()
 {
     EditorState current { processor.nodes, processor.dry,
-                          processor.gridLengthBeats, processor.subdivisions };
+                          processor.gridLengthBeats, processor.snapStepBeats };
 
     //--- bit-exact comparisons to detect any change since captureSnapshot() ---
     bool changed = current.nodes != snapshotBefore.nodes
         || std::memcmp(&current.dry,             &snapshotBefore.dry,             sizeof(DryNode)) != 0
         || std::memcmp(&current.gridLengthBeats, &snapshotBefore.gridLengthBeats, sizeof(float))   != 0
-        || current.subdivisions != snapshotBefore.subdivisions;
+        || std::memcmp(&current.snapStepBeats,   &snapshotBefore.snapStepBeats,   sizeof(float))   != 0;
 
     if (changed)
         undoManager.perform(new NodeAction(processor, snapshotBefore, current));
@@ -91,7 +97,16 @@ void NodeTimeline::timerCallback()
 {
     showProbTooltip = false;
     stopTimer();
+    flushProbGesture();   // gesture ended: commit the accumulated change as one undo step
     repaint();
+}
+
+//--- commit a pending probability-scroll gesture as a single undo entry ---
+void NodeTimeline::flushProbGesture()
+{
+    if (!probGestureActive) return;
+    probGestureActive = false;
+    pushUndoIfChanged();
 }
 
 //==============================================================================
@@ -182,6 +197,52 @@ int NodeTimeline::panNodeAt(juce::Point<float> p) const
     return bestIdx;
 }
 
+float NodeTimeline::satToY(float sat) const
+{
+    float usable = (float)getHeight() - 2.0f * kPadY;
+    return kPadY + (1.0f - juce::jlimit(0.0f, 1.0f, sat)) * usable;
+}
+
+float NodeTimeline::yToSat(float y) const
+{
+    float usable = (float)getHeight() - 2.0f * kPadY;
+    return juce::jlimit(0.0f, 1.0f, 1.0f - (y - kPadY) / usable);
+}
+
+int NodeTimeline::satNodeAt(juce::Point<float> p) const
+{
+    const float xThresh = kNodeRadius + 4.0f;
+    int   bestIdx  = -1;
+    float bestDist = xThresh + 1.0f;
+    for (int i = 0; i < (int)processor.nodes.size(); ++i)
+    {
+        float dx = std::abs(p.x - beatToX(processor.nodes[i].positionBeats));
+        if (dx <= xThresh && dx < bestDist) { bestDist = dx; bestIdx = i; }
+    }
+    return bestIdx;
+}
+
+void NodeTimeline::placeSatLineBetween(juce::Point<float> from, juce::Point<float> to)
+{
+    float xA    = std::min(from.x, to.x);
+    float xB    = std::max(from.x, to.x);
+    float xSpan = to.x - from.x;
+    const juce::ScopedLock sl(processor.getCallbackLock());
+    for (auto& n : processor.nodes)
+    {
+        float nx = beatToX(n.positionBeats);
+        if (nx < xA - kNodeRadius || nx > xB + kNodeRadius) continue;
+        float sat;
+        if (std::abs(xSpan) < 1.0f)
+            sat = yToSat((from.y + to.y) * 0.5f);
+        else {
+            float t = juce::jlimit(0.0f, 1.0f, (nx - from.x) / xSpan);
+            sat = yToSat(from.y + t * (to.y - from.y));
+        }
+        n.saturation = sat;
+    }
+}
+
 void NodeTimeline::placePanLineBetween(juce::Point<float> from, juce::Point<float> to)
 {
     float xA    = std::min(from.x, to.x);
@@ -206,7 +267,9 @@ void NodeTimeline::placePanLineBetween(juce::Point<float> from, juce::Point<floa
 
 float NodeTimeline::snapBeat(float beat) const
 {
-    float step = processor.gridLengthBeats / (float)processor.subdivisions;
+    //--- snap to the musical grid step (absolute beat value, independent of bar length) ---
+    float step = processor.snapStepBeats;
+    if (step <= 0.0f) return beat;
     return std::round(beat / step) * step;
 }
 
@@ -244,25 +307,30 @@ void NodeTimeline::paint(juce::Graphics& g)
     //--- background ---
     g.fillAll(juce::Colour(0xff141422));
 
-    //--- grid lines ---
-    const float stepBeats    = processor.gridLengthBeats / (float)processor.subdivisions;
-    const int   stepsPerBeat = processor.subdivisions / (int)processor.gridLengthBeats;
+    //--- grid lines: step is an absolute musical value (e.g. 0.25 = 1/16 note),
+    //    independent of bar length.  Beat lines (integer positions) are drawn brighter. ---
+    const float step     = processor.snapStepBeats;
+    const int   numSteps = (int)std::round(processor.gridLengthBeats / step);
 
-    for (int i = 0; i <= processor.subdivisions; ++i)
+    for (int i = 0; i <= numSteps; ++i)
     {
-        float x      = beatToX(i * stepBeats);
-        bool  isBeat = (i % stepsPerBeat) == 0;
+        float pos    = i * step;
+        float x      = beatToX(pos);
+        float nearest = std::round(pos);
+        bool  isBeat  = std::abs(pos - nearest) < step * 0.05f;  // within 5% of a beat position
         g.setColour(isBeat ? juce::Colour(0xff3a3a5a) : juce::Colour(0xff22223a));
         g.drawVerticalLine((int)x, kPadY * 0.5f, h - kPadY * 0.5f);
     }
 
-    //--- labels: DRY at beat 0, then 1 2 3 4 ---
+    //--- labels: DRY = musical beat 1; beat columns start at 2 so numbers
+    //    match what the user hears in their DAW.  Right edge is not labelled
+    //    (it is the next bar's beat 1, same as DRY). ---
     g.setFont(10.0f);
     g.setColour(juce::Colour(0xff5555aa));
-    g.drawText("DRY", (int)beatToX(0.0f) - 12, 4, 24, 12,
+    g.drawText("1", (int)beatToX(0.0f) - 8, 4, 16, 12,
                juce::Justification::centred, false);
-    for (int b = 1; b <= (int)processor.gridLengthBeats; ++b)
-        g.drawText(juce::String(b), (int)beatToX((float)b) - 8, 4, 16, 12,
+    for (int b = 1; b < (int)std::round(processor.gridLengthBeats); ++b)
+        g.drawText(juce::String(b + 1), (int)beatToX((float)b) - 8, 4, 16, 12,
                    juce::Justification::centred, false);
 
     //--- bottom baseline ---
@@ -343,52 +411,49 @@ void NodeTimeline::paint(juce::Graphics& g)
         float nx = beatToX(nodes[i].positionBeats);
         float ny = gainToY(nodes[i].gain);
         g.setColour(juce::Colour(0xff6677aa).withAlpha(nodes[i].active ? 0.9f : 0.4f));
-        g.drawText(juce::String(nodes[i].positionBeats, 2),
+        //--- +1 because DRY = beat 1, so positionBeats=1 → musical beat 2 etc. ---
+        g.drawText(juce::String(nodes[i].positionBeats + 1.0f, 2),
                    (int)nx - 18, (int)(ny - kNodeRadius - 14), 36, 11,
                    juce::Justification::centred, false);
     }
 
-    //--- pan edit overlay ---
-    if (panEditMode)
+    //--- overlay: dim gain layer when any edit mode is active ---
+    if (editMode != EditMode::None)
     {
-        //--- dim the gain layer ---
         g.setColour(juce::Colour(0x99000000));
         g.fillRect(0.0f, 0.0f, w, h);
+    }
 
-        //--- center line (pan = 0) ---
+    //--- pan overlay ---
+    if (editMode == EditMode::Pan)
+    {
         float panCy = panToY(0.0f);
         g.setColour(juce::Colour(0xff3a3a5a));
         g.drawHorizontalLine((int)panCy, kPadX, w - kPadX);
 
-        //--- L / R axis labels ---
         g.setFont(9.0f);
         g.setColour(juce::Colour(0xff5566aa));
         g.drawText("L", 4, (int)panToY(-1.0f) - 6, 14, 12, juce::Justification::centred, false);
         g.drawText("R", 4, (int)panToY( 1.0f) - 6, 14, 12, juce::Justification::centred, false);
 
-        //--- echo node pan dots ---
         for (int i = 0; i < (int)nodes.size(); ++i)
         {
-            float nx   = beatToX(nodes[i].positionBeats);
-            float ny   = panToY(nodes[i].pan);
+            float nx    = beatToX(nodes[i].positionBeats);
+            float ny    = panToY(nodes[i].pan);
             float alpha = nodes[i].active ? 0.9f : 0.4f;
-            auto  c    = panToColour(nodes[i].pan);
+            auto  c     = panToColour(nodes[i].pan);
             bool  inSel = std::find(multiSelection.begin(), multiSelection.end(), i)
                           != multiSelection.end();
-
             g.setColour(c.withAlpha(0.35f * alpha));
             g.drawLine(nx, panCy, nx, ny, 2.0f);
             g.setColour(c.withAlpha(alpha));
             g.fillEllipse(nx - kNodeRadius, ny - kNodeRadius, kNodeRadius * 2.0f, kNodeRadius * 2.0f);
-            if (inSel)
-            {
+            if (inSel) {
                 g.setColour(juce::Colours::white.withAlpha(0.8f));
                 g.drawEllipse(nx - kNodeRadius - 2.0f, ny - kNodeRadius - 2.0f,
                               (kNodeRadius + 2.0f) * 2.0f, (kNodeRadius + 2.0f) * 2.0f, 1.5f);
             }
         }
-
-        //--- dry node pan dot ---
         {
             float nx = beatToX(0.0f);
             float ny = panToY(processor.dry.pan);
@@ -402,11 +467,44 @@ void NodeTimeline::paint(juce::Graphics& g)
             g.setColour(c.withAlpha(0.85f));
             g.drawRect(nx - 3.5f, ny - 3.5f, 7.0f, 7.0f, 1.5f);
         }
-
-        //--- mode label ---
         g.setFont(9.0f);
         g.setColour(juce::Colour(0xff7788cc).withAlpha(0.7f));
-        g.drawText("PAN EDIT", (int)(w - 62.0f), 6, 56, 10, juce::Justification::centredRight, false);
+        g.drawText("PAN", (int)(w - 46.0f), 6, 40, 10, juce::Justification::centredRight, false);
+    }
+
+    //--- saturation overlay ---
+    if (editMode == EditMode::Sat)
+    {
+        float satBase = satToY(0.0f);
+        g.setColour(juce::Colour(0xff3a3a5a));
+        g.drawHorizontalLine((int)satBase, kPadX, w - kPadX);
+
+        g.setFont(9.0f);
+        g.setColour(juce::Colour(0xff886644));
+        g.drawText("0",   4, (int)satToY(0.0f) - 6, 18, 12, juce::Justification::centred, false);
+        g.drawText("MAX", 4, (int)satToY(1.0f) - 6, 26, 12, juce::Justification::centred, false);
+
+        for (int i = 0; i < (int)nodes.size(); ++i)
+        {
+            float nx    = beatToX(nodes[i].positionBeats);
+            float ny    = satToY(nodes[i].saturation);
+            float alpha = nodes[i].active ? 0.9f : 0.4f;
+            auto  c     = satToColour(nodes[i].saturation);
+            bool  inSel = std::find(multiSelection.begin(), multiSelection.end(), i)
+                          != multiSelection.end();
+            g.setColour(juce::Colour(0xffff7733).withAlpha(0.35f * alpha));
+            g.drawLine(nx, satBase, nx, ny, 2.0f);
+            g.setColour(c.withAlpha(alpha));
+            g.fillEllipse(nx - kNodeRadius, ny - kNodeRadius, kNodeRadius * 2.0f, kNodeRadius * 2.0f);
+            if (inSel) {
+                g.setColour(juce::Colours::white.withAlpha(0.8f));
+                g.drawEllipse(nx - kNodeRadius - 2.0f, ny - kNodeRadius - 2.0f,
+                              (kNodeRadius + 2.0f) * 2.0f, (kNodeRadius + 2.0f) * 2.0f, 1.5f);
+            }
+        }
+        g.setFont(9.0f);
+        g.setColour(juce::Colour(0xffcc7733).withAlpha(0.7f));
+        g.drawText("SAT", (int)(w - 46.0f), 6, 40, 10, juce::Justification::centredRight, false);
     }
 
     //--- rubber-band rectangle during Shift+drag ---
@@ -444,7 +542,7 @@ void NodeTimeline::paint(juce::Graphics& g)
 //==============================================================================
 void NodeTimeline::placeLineBetween(juce::Point<float> from, juce::Point<float> to)
 {
-    const float minBeat = processor.gridLengthBeats / (float)processor.subdivisions;
+    const float minBeat = processor.snapStepBeats;
     const float step    = minBeat;
 
     //--- collect all snap beats that fall between the two X positions ---
@@ -514,64 +612,67 @@ void NodeTimeline::mouseMove(const juce::MouseEvent& e)
 void NodeTimeline::mouseDown(const juce::MouseEvent& e)
 {
     grabKeyboardFocus();
+    flushProbGesture();   // commit any in-flight scroll gesture before a new edit
     captureSnapshot();
 
-    //--- pan edit mode: Option = line-draw pan, Shift = select, normal = drag ---
-    if (panEditMode && !e.mods.isRightButtonDown())
+    //--- overlay edit modes (pan / sat): Opt = line draw, Shift = select, normal = drag ---
+    auto handleOverlayDown = [&](auto nodeAtFn, auto yToValFn,
+                                 auto getVal, auto setVal,
+                                 int& dragIdx, float& dragStart,
+                                 std::vector<float>& multiStart,
+                                 bool& lineDrawing, juce::Point<float>& lastLine,
+                                 auto lineDrawFn) -> bool
     {
-        int panHit = panNodeAt(e.position);
+        if (e.mods.isRightButtonDown()) return false;
+        int hit = nodeAtFn(e.position);
 
-        if (e.mods.isAltDown())
-        {
-            panLineDrawing = true;
-            panLastLinePos = e.position;
-            placePanLineBetween(e.position, e.position);
-            repaint();
-            return;
+        if (e.mods.isAltDown()) {
+            lineDrawing = true;  lastLine = e.position;
+            lineDrawFn(e.position, e.position);
+            repaint();  return true;
         }
-
-        if (e.mods.isShiftDown())
-        {
-            if (panHit >= 0)
-            {
-                auto it = std::find(multiSelection.begin(), multiSelection.end(), panHit);
+        if (e.mods.isShiftDown()) {
+            if (hit >= 0) {
+                auto it = std::find(multiSelection.begin(), multiSelection.end(), hit);
                 if (it != multiSelection.end()) { multiSelection.erase(it); selectedIndex = multiSelection.empty() ? -1 : multiSelection.back(); }
-                else { multiSelection.push_back(panHit); selectedIndex = panHit; }
-            }
-            else
-            {
-                shiftSelecting = true;
-                shiftSelectStart = shiftSelectCurrent = e.position;
-                multiSelection.clear();
-                selectedIndex = -1;
-            }
-            repaint();
-            return;
+                else { multiSelection.push_back(hit); selectedIndex = hit; }
+            } else { shiftSelecting = true; shiftSelectStart = shiftSelectCurrent = e.position; multiSelection.clear(); selectedIndex = -1; }
+            repaint();  return true;
         }
-
-        if (panHit >= 0)
-        {
-            bool inSel = std::find(multiSelection.begin(), multiSelection.end(), panHit) != multiSelection.end();
-            if (!inSel) { multiSelection = { panHit }; selectedIndex = panHit; }
-
-            //--- immediately apply the click's Y position as pan —
-            //    the user doesn't need to drag; a single click sets the value ---
-            float clickPan = yToPan(e.position.y);
-            {
-                const juce::ScopedLock sl(processor.getCallbackLock());
-                processor.nodes[panHit].pan = clickPan;
-            }
-
-            //--- anchor for subsequent drag (delta from here) ---
-            panDragIdx      = panHit;
-            panDragStartPan = clickPan;
-            multiPanAtDragStart.clear();
+        if (hit >= 0) {
+            bool inSel = std::find(multiSelection.begin(), multiSelection.end(), hit) != multiSelection.end();
+            if (!inSel) { multiSelection = { hit }; selectedIndex = hit; }
+            float clickVal = yToValFn(e.position.y);
+            { const juce::ScopedLock sl(processor.getCallbackLock()); setVal(hit, clickVal); }
+            dragIdx   = hit;  dragStart = clickVal;
+            multiStart.clear();
             for (int i : multiSelection)
                 if (i >= 0 && i < (int)processor.nodes.size())
-                    multiPanAtDragStart.push_back(processor.nodes[i].pan);
-        }
-        else { multiSelection.clear(); selectedIndex = -1; }
-        repaint();
+                    multiStart.push_back(getVal(i));
+        } else { multiSelection.clear(); selectedIndex = -1; }
+        repaint();  return true;
+    };
+
+    if (editMode == EditMode::Pan) {
+        handleOverlayDown(
+            [this](auto p){ return panNodeAt(p); },
+            [this](float y){ return yToPan(y); },
+            [this](int i){ return processor.nodes[i].pan; },
+            [this](int i, float v){ processor.nodes[i].pan = v; },
+            panDragIdx, panDragStartPan, multiPanAtDragStart,
+            panLineDrawing, panLastLinePos,
+            [this](auto a, auto b){ placePanLineBetween(a, b); });
+        return;
+    }
+    if (editMode == EditMode::Sat) {
+        handleOverlayDown(
+            [this](auto p){ return satNodeAt(p); },
+            [this](float y){ return yToSat(y); },
+            [this](int i){ return processor.nodes[i].saturation; },
+            [this](int i, float v){ processor.nodes[i].saturation = v; },
+            satDragIdx, satDragStartSat, multiSatAtDragStart,
+            satLineDrawing, satLastLinePos,
+            [this](auto a, auto b){ placeSatLineBetween(a, b); });
         return;
     }
 
@@ -679,7 +780,7 @@ void NodeTimeline::mouseDown(const juce::MouseEvent& e)
         multiSelection.clear();
         selectedIndex = -1;
 
-        float minBeat = processor.gridLengthBeats / (float)processor.subdivisions;
+        float minBeat = processor.snapStepBeats;
         float beat    = juce::jlimit(minBeat, processor.gridLengthBeats, snapBeat(xToBeat(e.position.x)));
         float gain    = juce::jlimit(0.0f, 1.0f, yToGain(e.position.y));
 
@@ -713,7 +814,7 @@ void NodeTimeline::mouseDown(const juce::MouseEvent& e)
 
 void NodeTimeline::mouseDrag(const juce::MouseEvent& e)
 {
-    //--- rubber-band runs in both modes; use pan positions when in pan edit mode ---
+    //--- rubber-band: use overlay Y when in an edit mode ---
     if (shiftSelecting)
     {
         shiftSelectCurrent = e.position;
@@ -726,7 +827,9 @@ void NodeTimeline::mouseDrag(const juce::MouseEvent& e)
         const auto& ns = processor.nodes;
         for (int i = 0; i < (int)ns.size(); ++i)
         {
-            float ny = panEditMode ? panToY(ns[i].pan) : gainToY(ns[i].gain);
+            float ny = (editMode == EditMode::Pan) ? panToY(ns[i].pan)
+                     : (editMode == EditMode::Sat) ? satToY(ns[i].saturation)
+                     : gainToY(ns[i].gain);
             if (selRect.contains(beatToX(ns[i].positionBeats), ny))
                 multiSelection.push_back(i);
         }
@@ -735,40 +838,51 @@ void NodeTimeline::mouseDrag(const juce::MouseEvent& e)
         return;
     }
 
-    //--- pan line draw (Option+drag in pan mode) ---
-    if (panEditMode && panLineDrawing)
+    //--- pan line draw ---
+    if (editMode == EditMode::Pan && panLineDrawing)
     {
         placePanLineBetween(panLastLinePos, e.position);
-        panLastLinePos = e.position;
-        repaint();
-        return;
+        panLastLinePos = e.position;  repaint();  return;
     }
-
     //--- pan dot drag ---
-    if (panEditMode)
+    if (editMode == EditMode::Pan && panDragIdx >= 0 && panDragIdx < (int)processor.nodes.size())
     {
-        if (panDragIdx >= 0 && panDragIdx < (int)processor.nodes.size())
-        {
-            float pan   = yToPan(e.position.y);
-            bool  inSel = std::find(multiSelection.begin(), multiSelection.end(), panDragIdx)
-                          != multiSelection.end();
-            const juce::ScopedLock sl(processor.getCallbackLock());
-            if (inSel && multiSelection.size() > 1 && !multiPanAtDragStart.empty())
-            {
-                float delta = pan - panDragStartPan;
-                for (int k = 0; k < (int)std::min(multiSelection.size(), multiPanAtDragStart.size()); ++k)
-                    if (multiSelection[k] >= 0 && multiSelection[k] < (int)processor.nodes.size())
-                        processor.nodes[multiSelection[k]].pan =
-                            juce::jlimit(-1.0f, 1.0f, multiPanAtDragStart[k] + delta);
-            }
-            else
-            {
-                processor.nodes[panDragIdx].pan = pan;
-            }
-            repaint();
-        }
-        return;
+        float pan   = yToPan(e.position.y);
+        bool  inSel = std::find(multiSelection.begin(), multiSelection.end(), panDragIdx)
+                      != multiSelection.end();
+        const juce::ScopedLock sl(processor.getCallbackLock());
+        if (inSel && multiSelection.size() > 1 && !multiPanAtDragStart.empty()) {
+            float delta = pan - panDragStartPan;
+            for (int k = 0; k < (int)std::min(multiSelection.size(), multiPanAtDragStart.size()); ++k)
+                if (multiSelection[k] >= 0 && multiSelection[k] < (int)processor.nodes.size())
+                    processor.nodes[multiSelection[k]].pan = juce::jlimit(-1.0f, 1.0f, multiPanAtDragStart[k] + delta);
+        } else { processor.nodes[panDragIdx].pan = pan; }
+        repaint();  return;
     }
+    if (editMode == EditMode::Pan) return;  // no other action in pan mode
+
+    //--- sat line draw ---
+    if (editMode == EditMode::Sat && satLineDrawing)
+    {
+        placeSatLineBetween(satLastLinePos, e.position);
+        satLastLinePos = e.position;  repaint();  return;
+    }
+    //--- sat dot drag ---
+    if (editMode == EditMode::Sat && satDragIdx >= 0 && satDragIdx < (int)processor.nodes.size())
+    {
+        float sat   = yToSat(e.position.y);
+        bool  inSel = std::find(multiSelection.begin(), multiSelection.end(), satDragIdx)
+                      != multiSelection.end();
+        const juce::ScopedLock sl(processor.getCallbackLock());
+        if (inSel && multiSelection.size() > 1 && !multiSatAtDragStart.empty()) {
+            float delta = sat - satDragStartSat;
+            for (int k = 0; k < (int)std::min(multiSelection.size(), multiSatAtDragStart.size()); ++k)
+                if (multiSelection[k] >= 0 && multiSelection[k] < (int)processor.nodes.size())
+                    processor.nodes[multiSelection[k]].saturation = juce::jlimit(0.0f, 1.0f, multiSatAtDragStart[k] + delta);
+        } else { processor.nodes[satDragIdx].saturation = sat; }
+        repaint();  return;
+    }
+    if (editMode == EditMode::Sat) return;  // no other action in sat mode
 
     //--- line-draw mode: fill snap positions as mouse sweeps ---
     if (drawingLine)
@@ -790,7 +904,7 @@ void NodeTimeline::mouseDrag(const juce::MouseEvent& e)
     if (dragIndex < 0 || dragIndex >= (int)processor.nodes.size()) return;
 
     float beat = snapBeat(xToBeat(e.position.x));
-    float minBeat = processor.gridLengthBeats / (float)processor.subdivisions;
+    float minBeat = processor.snapStepBeats;
     beat = juce::jlimit(minBeat, processor.gridLengthBeats, beat);
     float gain = yToGain(e.position.y);
 
@@ -833,13 +947,14 @@ void NodeTimeline::mouseDrag(const juce::MouseEvent& e)
 
 void NodeTimeline::mouseUp(const juce::MouseEvent& e)
 {
-    drawingLine          = false;
-    shiftSelecting       = false;
-    dragIndex            = -1;
-    panDragIdx           = -1;
-    panLineDrawing       = false;
+    drawingLine    = false;
+    shiftSelecting = false;
+    dragIndex      = -1;
+    panDragIdx     = -1;  panLineDrawing = false;
+    satDragIdx     = -1;  satLineDrawing = false;
     multiGainAtDragStart.clear();
     multiPanAtDragStart.clear();
+    multiSatAtDragStart.clear();
     pushUndoIfChanged();
     updateCursor(e.position, e.mods.isAltDown());
 }
@@ -859,6 +974,8 @@ void NodeTimeline::mouseDoubleClick(const juce::MouseEvent& e)
 
 bool NodeTimeline::keyPressed(const juce::KeyPress& key)
 {
+    flushProbGesture();   // commit any in-flight scroll gesture before undo/redo or delete
+
     //--- Cmd+Z / Cmd+Shift+Z / Cmd+Y ---
     if (key.getModifiers().isCommandDown())
     {
@@ -900,7 +1017,10 @@ void NodeTimeline::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWh
     int hit = echoNodeAt(e.position);
     if (hit >= 0)
     {
-        captureSnapshot();
+        //--- start a new gesture only on the first notch; subsequent notches
+        //    accumulate against the same snapshot so the whole scroll is one undo ---
+        if (!probGestureActive) { captureSnapshot(); probGestureActive = true; }
+
         bool hitInSel = std::find(multiSelection.begin(), multiSelection.end(), hit)
                         != multiSelection.end();
         const juce::ScopedLock sl(processor.getCallbackLock());
@@ -918,7 +1038,7 @@ void NodeTimeline::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWh
         }
         probTooltipIdx  = hit;
         showProbTooltip = true;
-        startTimer(1500);
-        pushUndoIfChanged();
+        startTimer(1500);   // (re)arm; gesture commits when the timer finally fires
+        repaint();
     }
 }

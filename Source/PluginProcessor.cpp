@@ -21,7 +21,7 @@ const juce::String EchoGridProcessor::getName() const        { return JucePlugin
 bool EchoGridProcessor::acceptsMidi() const                  { return false; }
 bool EchoGridProcessor::producesMidi() const                 { return false; }
 bool EchoGridProcessor::isMidiEffect() const                 { return false; }
-double EchoGridProcessor::getTailLengthSeconds() const       { return std::numeric_limits<double>::infinity(); }
+double EchoGridProcessor::getTailLengthSeconds() const       { return tailSeconds.load(); }
 int EchoGridProcessor::getNumPrograms()                      { return 1; }
 int EchoGridProcessor::getCurrentProgram()                   { return 0; }
 void EchoGridProcessor::setCurrentProgram(int)               {}
@@ -36,7 +36,10 @@ void EchoGridProcessor::getStateInformation(juce::MemoryBlock& destData)
     root.setAttribute("dryPan",           (double)dry.pan);
     root.setAttribute("analogAmount",     (double)analogAmount);
     root.setAttribute("gridLengthBeats",  (double)gridLengthBeats);
-    root.setAttribute("subdivisions",     subdivisions);
+    root.setAttribute("snapStepBeats",    (double)snapStepBeats);
+    root.setAttribute("lpCutoffHz",       (double)lpCutoffHz);
+    root.setAttribute("hpCutoffHz",       (double)hpCutoffHz);
+    root.setAttribute("filterDry",        filterDry);
 
     //--- echo nodes ---
     for (const auto& n : nodes)
@@ -46,6 +49,7 @@ void EchoGridProcessor::getStateInformation(juce::MemoryBlock& destData)
         e->setAttribute("gain",          (double)n.gain);
         e->setAttribute("pan",           (double)n.pan);
         e->setAttribute("probability",   (double)n.probability);
+        e->setAttribute("saturation",    (double)n.saturation);
         e->setAttribute("active",        n.active);
         e->setAttribute("reverse",       n.reverse);
     }
@@ -62,7 +66,19 @@ void EchoGridProcessor::setStateInformation(const void* data, int sizeInBytes)
     dry.pan          = (float)xml->getDoubleAttribute("dryPan",          0.0);
     analogAmount     = (float)xml->getDoubleAttribute("analogAmount",    0.0);
     gridLengthBeats  = (float)xml->getDoubleAttribute("gridLengthBeats", 4.0);
-    subdivisions     = xml->getIntAttribute("subdivisions", 16);
+    lpCutoffHz       = (float)xml->getDoubleAttribute("lpCutoffHz",      20000.0);
+    hpCutoffHz       = (float)xml->getDoubleAttribute("hpCutoffHz",      20.0);
+    filterDry        = xml->getBoolAttribute("filterDry", false);
+    //--- load snap step; support old preset files that stored an int subdivisions count ---
+    if (xml->hasAttribute("snapStepBeats"))
+        snapStepBeats = (float)xml->getDoubleAttribute("snapStepBeats", 0.25);
+    else
+    {
+        //--- legacy conversion: old subdivisions was a count across the bar;
+        //    assume 4-beat bar so step = 4 / subdivisions beats ---
+        int oldDiv = xml->getIntAttribute("subdivisions", 16);
+        snapStepBeats = 4.0f / juce::jmax(1, oldDiv);
+    }
 
     const juce::ScopedLock sl(getCallbackLock());
     nodes.clear();
@@ -75,6 +91,7 @@ void EchoGridProcessor::setStateInformation(const void* data, int sizeInBytes)
         n.gain          = (float)e->getDoubleAttribute("gain",          0.7);
         n.pan           = (float)e->getDoubleAttribute("pan",           0.0);
         n.probability   = (float)e->getDoubleAttribute("probability",   1.0);
+        n.saturation    = (float)e->getDoubleAttribute("saturation",    0.0);
         n.active        = e->getBoolAttribute("active",  true);
         n.reverse       = e->getBoolAttribute("reverse", false);
         nodes.push_back(n);
@@ -95,15 +112,29 @@ void EchoGridProcessor::prepareToPlay(double sampleRate, int)
     writePosition      = 0;
     samplesUntilReroll = 0;
     lastNodeCount      = 0;
+    setLatencySamples(0);
 
-    //--- pre-allocate the full NodeState pool so that rerollNodes() never
-    //    calls any allocator on the audio thread (Fix: real-time safety) ---
+    //--- pre-allocate the full NodeState pool and reset all state ---
     nodeStates.resize(kMaxNodes);
     for (auto& st : nodeStates)
-        initReverseBuffer(st);
+    {
+        st.gainEnvelope = 1.0f;
+        st.timingJitter = 0.0f;
+        st.fired        = true;
+    }
+    fallbackBeats = 0.0;
 
     //--- seed fired values for the currently active nodes ---
     rerollNodes();
+
+    //--- reset and initialise LP/HP filters ---
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        lpWet[ch].reset(); hpWet[ch].reset();
+        lpDry[ch].reset(); hpDry[ch].reset();
+    }
+    lastLpHz = -1.0f; lastHpHz = -1.0f;  // force coefficient update on first block
+    updateFilterCoefficients();
 }
 
 void EchoGridProcessor::releaseResources()
@@ -124,30 +155,62 @@ bool EchoGridProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 //==============================================================================
 // Variability
 //==============================================================================
-void EchoGridProcessor::initReverseBuffer(NodeState& st)
-{
-    if (currentSampleRate <= 0.0) return;
-    const int maxD = static_cast<int>(currentSampleRate * 4.0); // 4 sec max
-    for (int b = 0; b < 2; ++b)
-    {
-        st.revL[b].assign(maxD, 0.0f);
-        st.revR[b].assign(maxD, 0.0f);
-    }
-    st.revFillPos = 0;
-    st.revPlayBuf = 0;
-    st.revReady   = false;
-}
 
 void EchoGridProcessor::rerollNodes()
 {
-    //--- nodeStates is pre-allocated to kMaxNodes; we NEVER resize here so
-    //    this function is safe to call from the audio thread.
-    //    We only update the fired flags for the currently active node range. ---
+    //--- nodeStates pool is pre-allocated to kMaxNodes in prepareToPlay; we
+    //    never resize here so this is safe to call from the audio thread. ---
     const int activeCount = juce::jmin((int)nodes.size(), kMaxNodes);
+
+    if (lastNodeCount != activeCount)
+    {
+        //--- Node list changed.  Preserve existing lower-index slot state so
+        //    active reverses aren't stomped when the user edits the node list.
+        //    Only initialise newly allocated slots or clear now-unused slots.
+        if (activeCount > lastNodeCount)
+        {
+            // initialise only the new slots between lastNodeCount..activeCount-1
+            for (int i = lastNodeCount; i < activeCount; ++i)
+            {
+                auto& st = nodeStates[i];
+                st.gainEnvelope = 0.0f; st.timingJitter = 0.0f; st.fired = true;
+            }
+        }
+        else
+        {
+            for (int i = activeCount; i < lastNodeCount && i < kMaxNodes; ++i)
+            {
+                auto& st = nodeStates[i];
+                st.gainEnvelope = 0.0f; st.timingJitter = 0.0f; st.fired = false;
+            }
+        }
+    }
+
     for (int i = 0; i < activeCount; ++i)
         nodeStates[i].fired = (rng.nextFloat() < nodes[i].probability);
 
-    lastNodeCount = (int)nodes.size();
+    lastNodeCount = activeCount;
+}
+
+//==============================================================================
+// Filter helper
+//==============================================================================
+void EchoGridProcessor::updateFilterCoefficients()
+{
+    const float nyquist = (float)currentSampleRate * 0.49f;
+    const float lp = juce::jlimit(200.0f,  nyquist, lpCutoffHz);
+    const float hp = juce::jlimit(20.0f,   lp * 0.9f, hpCutoffHz);
+
+    auto lpC = juce::IIRCoefficients::makeLowPass (currentSampleRate, (double)lp);
+    auto hpC = juce::IIRCoefficients::makeHighPass(currentSampleRate, (double)hp);
+
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        lpWet[ch].setCoefficients(lpC); hpWet[ch].setCoefficients(hpC);
+        lpDry[ch].setCoefficients(lpC); hpDry[ch].setCoefficients(hpC);
+    }
+    lastLpHz = lpCutoffHz;
+    lastHpHz = hpCutoffHz;
 }
 
 //==============================================================================
@@ -157,12 +220,18 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 {
     juce::ScopedNoDenormals noDenormals;
 
-    //--- get host BPM (fall back to 120 if unavailable) ---
-    double bpm = 120.0;
+    //--- get host BPM + song position + bar start (fall back to 120 BPM / free) ---
+    double bpm          = 120.0;
+    double hostPpq      = 0.0;
+    double hostBarStart = 0.0;
+    bool   havePpq      = false;
     if (auto* ph = getPlayHead())
         if (auto pos = ph->getPosition())
-            if (auto b = pos->getBpm())
-                bpm = *b;
+        {
+            if (auto b  = pos->getBpm())                       bpm     = *b;
+            if (auto q  = pos->getPpqPosition())             { hostPpq = *q; havePpq = true; }
+            if (auto bs = pos->getPpqPositionOfLastBarStart()) hostBarStart = *bs;
+        }
 
     const int    numSamples  = buffer.getNumSamples();
     const int    bufSize     = delayBuffer.getNumSamples();
@@ -171,6 +240,44 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     if (bufSize == 0 || numChannels == 0) return;
 
     const double samplesPerBeat = (60.0 / bpm) * currentSampleRate;
+
+    //--- song position in beats at the start of this block, used to lock reverse
+    //    windows to the host grid.  Fall back to a free-running counter when the
+    //    host supplies no play position (e.g. some standalone/offline cases). ---
+    const double songBeats0 = havePpq ? hostPpq : fallbackBeats;
+    const double barStart0  = havePpq ? hostBarStart : 0.0;   // anchor reverse to the bar
+
+    //--- minimum reverse grain length (~60 ms): the floor that stops a reverse
+    //    tap from collapsing into buzz as it approaches the dry.  Grain length
+    //    follows the tap delay but never drops below this. ---
+    const int minRevGrain = juce::jmax(1, (int)(0.060 * currentSampleRate));
+
+    //--- reverse splice crossfade length (~4 ms): short seam fade that de-clicks
+    //    grain boundaries without a second stream (which would ghost). ---
+    const int spliceXfade = juce::jmax(1, (int)(0.004 * currentSampleRate));
+
+    //--- cache a finite tail length for the host: the longest active echo delay.
+    //    Reverse nodes need ~2×D (record D, then play it back), and there's no
+    //    feedback, so the tail never exceeds this.  Clamped to the buffer length. ---
+    {
+        double maxTailSamples = 0.0;
+        const int tailCount = juce::jmin((int)nodes.size(), kMaxNodes);
+        for (int i = 0; i < tailCount; ++i)
+        {
+            if (!nodes[i].active) continue;
+            double d = nodes[i].positionBeats * samplesPerBeat;
+            if (nodes[i].reverse) d *= 2.0;
+            maxTailSamples = juce::jmax(maxTailSamples, d);
+        }
+        tailSeconds.store(juce::jmin((double)bufSize, maxTailSamples) / currentSampleRate);
+    }
+
+    //--- Zero-latency by design: this is the real-time delay mode, so dry passes
+    //    through instantly and you can play/record live through the plugin.  Echo
+    //    offsets (including reverse) are the effect itself and are NOT latency-
+    //    compensated — reporting latency here is the tape-style behaviour we chose
+    //    against.  Latency is set once to 0 in prepareToPlay and never touched on
+    //    the audio thread. ---
 
     //--- reroll fired flags when the node count changes (no allocation —
     //    nodeStates pool is always kMaxNodes entries after prepareToPlay) ---
@@ -185,35 +292,33 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         samplesUntilReroll = static_cast<int>(samplesPerBeat * gridLengthBeats);
     }
 
-    //--- update per-node analog timing jitter (slow random walk) ---
-    //    max jitter = analogAmount * 5% of delay time
-    //    clamped to active node range (never exceeds kMaxNodes) ---
-    const float jitterRate   = 0.002f * analogAmount;
-    const int   activeCount  = juce::jmin((int)nodes.size(), kMaxNodes);
+    //--- analog timing jitter: disabled until the analog knob is re-enabled.
+    //    The decay keeps timingJitter settled at 0 so forward echo offsets stay clean.
+    const int activeCount = juce::jmin((int)nodes.size(), kMaxNodes);
     for (int i = 0; i < activeCount; ++i)
-    {
-        float drift = (rng.nextFloat() * 2.0f - 1.0f) * jitterRate
-                      * (float)(nodes[i].positionBeats * samplesPerBeat);
-        nodeStates[i].timingJitter += drift;
         nodeStates[i].timingJitter *= 0.998f;
-    }
 
     //--- smoothing coefficient: ~8ms click-free gain transitions ---
     const float smoothCoeff = 1.0f - std::exp(-1.0f / (0.008f * (float)currentSampleRate));
 
-    //--- sample-by-sample loop ---
+    //--- update LP/HP filter coefficients if the user changed them ---
+    if (std::abs(lpCutoffHz - lastLpHz) > 0.5f || std::abs(hpCutoffHz - lastHpHz) > 0.5f)
+        updateFilterCoefficients();
+
+    //--- sample-by-sample audio processing loop ---
+    //    dry signal + echo nodes + filters + write to circular delay buffer.
     for (int s = 0; s < numSamples; ++s)
     {
         const float rawL = buffer.getSample(0, s);
         const float rawR = (numChannels > 1) ? buffer.getSample(1, s) : rawL;
 
-        //--- dry signal ---
-        {
-            float angle = (dry.pan * 0.5f + 0.5f) * juce::MathConstants<float>::halfPi;
-            buffer.setSample(0, s, rawL * dry.gain * std::cos(angle));
-            if (numChannels > 1)
-                buffer.setSample(1, s, rawR * dry.gain * std::sin(angle));
-        }
+        //--- dry signal mix: apply gain and pan to the direct input path ---
+        const float dryAngle = (dry.pan * 0.5f + 0.5f) * juce::MathConstants<float>::halfPi;
+        float dryL = rawL * dry.gain * std::cos(dryAngle);
+        float dryR = (numChannels > 1) ? rawR * dry.gain * std::sin(dryAngle) : dryL;
+
+        //--- wet signal accumulator (echo nodes add into this) ---
+        float wetL = 0.0f, wetR = 0.0f;
 
         //--- echo nodes (guarded to pool size so nodeStates[i] is always valid) ---
         for (int i = 0; i < (int)nodes.size() && i < kMaxNodes; ++i)
@@ -234,61 +339,114 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
             float angle = (node.pan * 0.5f + 0.5f) * juce::MathConstants<float>::halfPi;
 
+            float echoL, echoR;
+
             if (node.reverse)
             {
-                //--- true reverse: double-buffer ---
-                //    while filling block N, play block N-1 in reverse;
-                //    swap buffers when the fill block is full (every D samples)
-                int D = state.revL[0].empty()
-                            ? 0 : juce::jmin(baseOffset, (int)state.revL[0].size());
-                if (D < 1) continue;
+                //--- Reverse delay (Crystallizer-style, decoupled):
+                //    the tap POSITION is the delay (when the echo lands — exactly
+                //    like a forward tap), and the GRAIN length is the GRID
+                //    subdivision (what gets reversed).  Decoupling these two is what
+                //    makes the reverse land where you place the tap.  The delayed
+                //    audio is read backwards in grains of L, anchored to the bar so
+                //    it repeats every bar, with a short splice crossfade per seam. ---
+                double Lbeats = (double)snapStepBeats;                  // grain = grid step
+                const double Lmin = (double)minRevGrain / samplesPerBeat;
+                if (Lbeats < Lmin) Lbeats = Lmin;                       // floor (no buzz)
 
-                //--- reset fill cursor if D shrank (e.g. node moved or BPM change) ---
-                if (state.revFillPos >= D) { state.revFillPos = 0; state.revReady = false; }
+                //--- snap grain to an integer division of the bar (clean tiling) ---
+                const int    nG     = juce::jmax(1, (int)std::lround(gridLengthBeats / Lbeats));
+                Lbeats              = (double)gridLengthBeats / (double)nG;
+                const int    G      = juce::jmax(1, (int)std::lround(Lbeats * samplesPerBeat));
 
-                const int fillBuf = 1 - state.revPlayBuf;
+                //--- delay = tap position, but at least one grain so the reverse is
+                //    causal (we can only reverse audio already recorded) ---
+                const double Pd     = juce::jmax((double)node.positionBeats, Lbeats);
+                const int    Ds     = (int)std::lround(Pd * samplesPerBeat);
+                const int    X      = juce::jlimit(1, juce::jmax(1, G / 4), spliceXfade);
 
-                //--- record raw input into fill buffer ---
-                state.revL[fillBuf][state.revFillPos] = rawL;
-                state.revR[fillBuf][state.revFillPos] = rawR;
+                //--- reversal inherently plays the grain back over the next grain, so
+                //    its onset lands one grain (G) late.  Subtract G from the delay so
+                //    the reverse onset matches a forward tap at the same position. ---
+                const int    Deff   = Ds - G;
 
-                //--- output reversed play buffer ---
-                if (state.revReady)
+                //--- phase within the grain at the DELAYED bar position, anchored to
+                //    the bar so every bar is identical ---
+                const double songBeats  = songBeats0 + (double)s / samplesPerBeat;
+                const double delRel     = (songBeats - Pd) - barStart0;
+                const double phaseBeats = delRel - std::floor(delRel / Lbeats) * Lbeats;
+                const int    p          = juce::jlimit(0, G - 1, (int)(phaseBeats * samplesPerBeat));
+
+                //--- read backwards within the grain (2·p+1), shifted by the delay ---
+                const int offP = juce::jlimit(1, bufSize - 1, Deff + 2 * p + 1);
+                const int rP   = (writePosition - offP + bufSize) % bufSize;
+                echoL = delayBuffer.getSample(0, rP);
+                echoR = (numChannels > 1) ? delayBuffer.getSample(1, rP) : echoL;
+
+                //--- seam crossfade: new grain IN while previous grain's tail
+                //    (offset + 2·G) continues OUT — click-free, no ghost ---
+                if (p < X)
                 {
-                    const int playPos = D - 1 - state.revFillPos;
-                    buffer.addSample(0, s,
-                        state.revL[state.revPlayBuf][playPos]
-                        * state.gainEnvelope * std::cos(angle));
-                    if (numChannels > 1)
-                        buffer.addSample(1, s,
-                            state.revR[state.revPlayBuf][playPos]
-                            * state.gainEnvelope * std::sin(angle));
-                }
+                    const int offO = juce::jlimit(1, bufSize - 1, Deff + 2 * p + 2 * G + 1);
+                    const int rO   = (writePosition - offO + bufSize) % bufSize;
+                    const float t  = (float)p / (float)X;                            // 0→1
+                    const float wN = std::sin(t * juce::MathConstants<float>::halfPi); // new in
+                    const float wO = std::cos(t * juce::MathConstants<float>::halfPi); // old out
 
-                //--- advance fill cursor; swap when block is complete ---
-                if (++state.revFillPos >= D)
-                {
-                    state.revFillPos = 0;
-                    state.revPlayBuf = fillBuf;
-                    state.revReady   = true;
+                    echoL = wN * echoL + wO * delayBuffer.getSample(0, rO);
+                    echoR = (numChannels > 1)
+                          ? wN * echoR + wO * delayBuffer.getSample(1, rO)
+                          : echoL;
                 }
             }
             else
             {
-                //--- forward echo: read from circular delay buffer ---
-                int readOffset = juce::jlimit(1, bufSize - 1,
+                //--- forward echo playback path ---
+                //    normal delay read from the circular buffer, with any jitter
+                //    currently disabled.
+                const int readOffset = juce::jlimit(1, bufSize - 1,
                     baseOffset + static_cast<int>(state.timingJitter));
-                int readPos = (writePosition - readOffset + bufSize) % bufSize;
+                const int readPos = (writePosition - readOffset + bufSize) % bufSize;
 
-                buffer.addSample(0, s,
-                    delayBuffer.getSample(0, readPos) * state.gainEnvelope * std::cos(angle));
-                if (numChannels > 1)
-                    buffer.addSample(1, s,
-                        delayBuffer.getSample(1, readPos) * state.gainEnvelope * std::sin(angle));
+                echoL = delayBuffer.getSample(0, readPos);
+                echoR = (numChannels > 1) ? delayBuffer.getSample(1, readPos) : echoL;
             }
+
+            //--- tape saturation is disabled for now.
+            //    The saturation code is preserved but bypassed so the reverse
+            //    playback path remains simpler during debugging.
+            // {
+            //     const float drive = 1.0f + node.saturation * node.saturation * 10.0f;
+            //     const float norm  = 1.0f / std::tanh(drive);
+            //     echoL = std::tanh(echoL * drive) * norm;
+            //     echoR = std::tanh(echoR * drive) * norm;
+            // }
+
+            wetL += echoL * state.gainEnvelope * std::cos(angle);
+            if (numChannels > 1)
+                wetR += echoR * state.gainEnvelope * std::sin(angle);
         }
 
-        //--- write only dry input to delay buffer ---
+        //--- LP/HP filter: wet always, dry only when filterDry is on.
+        //    Dry filters run every sample regardless so their state stays warm
+        //    (no click when filterDry is toggled). ---
+        wetL = lpWet[0].processSingleSampleRaw(hpWet[0].processSingleSampleRaw(wetL));
+        if (numChannels > 1)
+            wetR = lpWet[1].processSingleSampleRaw(hpWet[1].processSingleSampleRaw(wetR));
+
+        const float filtDryL = lpDry[0].processSingleSampleRaw(hpDry[0].processSingleSampleRaw(dryL));
+        const float filtDryR = (numChannels > 1)
+            ? lpDry[1].processSingleSampleRaw(hpDry[1].processSingleSampleRaw(dryR)) : filtDryL;
+
+        const float outDryL = filterDry ? filtDryL : dryL;
+        const float outDryR = filterDry ? filtDryR : dryR;
+
+        //--- output: dry + wet ---
+        buffer.setSample(0, s, outDryL + wetL);
+        if (numChannels > 1)
+            buffer.setSample(1, s, outDryR + wetR);
+
+        //--- write raw input to delay buffer ---
         delayBuffer.setSample(0, writePosition, rawL);
         if (numChannels > 1)
             delayBuffer.setSample(1, writePosition, rawR);
@@ -296,18 +454,9 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         writePosition = (writePosition + 1) % bufSize;
     }
 
-    //--- report latency for active reverse nodes so the DAW can compensate ---
-    int maxRevSamples = 0;
-    for (int i = 0; i < (int)nodes.size(); ++i)
-    {
-        if (nodes[i].active && nodes[i].reverse)
-        {
-            int D = static_cast<int>(nodes[i].positionBeats * samplesPerBeat);
-            maxRevSamples = juce::jmax(maxRevSamples, D);
-        }
-    }
-    if (maxRevSamples != getLatencySamples())
-        setLatencySamples(maxRevSamples);
+    //--- advance the free-running song-position counter so reverse windows stay
+    //    continuous across blocks when the host gives no play position. ---
+    fallbackBeats = songBeats0 + (double)numSamples / samplesPerBeat;
 }
 
 //==============================================================================

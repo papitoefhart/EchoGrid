@@ -5,6 +5,26 @@
 #include "NodeInspector.h"
 
 //==============================================================================
+// Dark LookAndFeel: applies a dark colour scheme to the ComboBox and its popup
+//==============================================================================
+class DarkComboLAF : public juce::LookAndFeel_V4
+{
+public:
+    DarkComboLAF()
+    {
+        setColour(juce::ComboBox::backgroundColourId,      juce::Colour(0xff1a1a2e));
+        setColour(juce::ComboBox::textColourId,            juce::Colour(0xff5566aa));
+        setColour(juce::ComboBox::outlineColourId,         juce::Colour(0xff2a2a50));
+        setColour(juce::ComboBox::arrowColourId,           juce::Colour(0xff5566aa));
+        setColour(juce::ComboBox::focusedOutlineColourId,  juce::Colour(0xff4455aa));
+        setColour(juce::PopupMenu::backgroundColourId,     juce::Colour(0xff141428));
+        setColour(juce::PopupMenu::textColourId,           juce::Colour(0xffccccee));
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, juce::Colour(0xff2a2a6a));
+        setColour(juce::PopupMenu::highlightedTextColourId,       juce::Colour(0xffffffff));
+    }
+};
+
+//==============================================================================
 // Curved undo/redo arrow button — drawn as vector paths so no font glyph needed
 //==============================================================================
 class UndoArrowButton : public juce::Button
@@ -41,13 +61,19 @@ private:
     juce::TextButton beatBtns[4];
     static constexpr int beatOptions[4] = { 1, 2, 4, 8 };
 
-    //--- subdivision buttons: 4 8 16 32 steps ---
-    juce::TextButton subdivBtns[4];
-    static constexpr int subdivOptions[4] = { 4, 8, 16, 32 };
+    //--- subdivision ComboBox: musical grid values including triplets ---
+    DarkComboLAF     darkComboLAF;
+    juce::ComboBox   subdivBox;
 
-    juce::TextButton  panModeBtn { "PAN" };
+    juce::ComboBox    layerBox;   // selects automation overlay: none / pan / sat
     UndoArrowButton   undoBtn    { false };  // ↺ undo
     UndoArrowButton   redoBtn    { true  };  // ↻ redo
+
+    //--- filter knobs ---
+    juce::Slider hpSlider     { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::Slider lpSlider     { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::TextButton filterDryBtn { "FILT DRY" };
+
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EchoGridEditor)
 };

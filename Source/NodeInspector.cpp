@@ -114,7 +114,7 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
     };
     addAndMakeVisible(panSlider);
 
-    //--- reverse button: applies to all selected nodes, supports undo ---
+    //--- reverse button ---
     styleButton(reverseBtn);
     reverseBtn.setClickingTogglesState(true);
     reverseBtn.onClick = [this]
@@ -122,7 +122,6 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
         if (syncing) return;
         const auto& sel = timeline.getMultiSelection();
         if (sel.empty()) return;
-
         timeline.captureSnapshot();
         bool newState = reverseBtn.getToggleState();
         {
@@ -285,7 +284,7 @@ void NodeInspector::syncFromProcessor(int idx)
     else if (isEcho)
     {
         const auto& n = processor.nodes[idx];
-        nodeLabel.setText("@ " + juce::String(n.positionBeats, 2) + "b",
+        nodeLabel.setText("@ " + juce::String(n.positionBeats + 1.0f, 2) + "b",
                           juce::dontSendNotification);
         if (!gainDragging) gainSlider.setValue(n.gain, juce::dontSendNotification);
         if (!panDragging)  panSlider.setValue(n.pan,  juce::dontSendNotification);
