@@ -42,7 +42,8 @@ public:
 struct RunResult { std::vector<float> out, in; };
 
 static RunResult runReverse(double sampleRate, int blockSize, float positionBeats,
-                            long totalSamples, const std::function<float(long)>& input)
+                            long totalSamples, const std::function<float(long)>& input,
+                            float revLength = 1.0f, bool revLock = true)
 {
     EchoGridProcessor proc;
     proc.prepareToPlay(sampleRate, blockSize);
@@ -51,6 +52,7 @@ static RunResult runReverse(double sampleRate, int blockSize, float positionBeat
     proc.nodes.clear();
     EchoNode n; n.positionBeats = positionBeats; n.gain = 1.0f; n.pan = 0.0f;
     n.probability = 1.0f; n.saturation = 0.0f; n.active = true; n.reverse = true;
+    n.reverseLength = revLength; n.reverseLock = revLock;
     proc.nodes.push_back(n);
 
     MockPlayHead head; head.bpm_ = 120.0; head.sampleRate_ = sampleRate;
@@ -195,6 +197,50 @@ int main()
                   << (ok ? "  [OK]" : (consistent ? "  [WRONG SPOT]" : "  [VARIES <-- BUG]")) << "\n";
         if (!ok) ++failures;
     }
+
+    //--------------------------------------------------------------------------
+    // TEST 4 — REV LEN knob + IN TIME / FREE toggle.
+    //   IN TIME: any length keeps the attack at the tap delay (on the beat).
+    //   FREE: the attack lands at 2 x (length x tap) — drifts as length grows.
+    //--------------------------------------------------------------------------
+    std::cout << "\n--- Test 4a: IN TIME — attack stays at tap delay for any length ---\n";
+    for (float tap : { 1.0f, 2.0f, 3.0f })
+        for (float len : { 1.0f, 0.5f, 0.25f })
+        {
+            const long t0 = 2 * bar, total = t0 + 2 * bar;
+            auto click = [t0](long i) -> float { return (i == t0) ? 1.0f : 0.0f; };
+            RunResult r = runReverse(sampleRate, blockSize, tap, total, click, len, /*lock=*/true);
+            long peak = -1; float best = 0.0f;
+            for (long g = t0 + 1; g < t0 + bar; ++g)
+            { float a = std::fabs(r.out[g]); if (a > best) { best = a; peak = g; } }
+            double delay = (peak < 0) ? -1 : (double)(peak - t0) / spb;
+            bool ok = (peak > 0) && std::fabs(delay - tap) < 0.05;
+            std::cout << "  tap=" << tap << "b len=" << len
+                      << "  attack delay=" << delay << "b (want " << tap << ")"
+                      << (ok ? "  [OK]" : "  [FAIL]") << "\n";
+            if (!ok) ++failures;
+        }
+
+    //--- FREE mode is currently disabled in the UI (kShowReverseTimingToggle=false)
+    //    but the DSP is kept; this test guards that dormant path stays correct. ---
+    std::cout << "\n--- Test 4b: FREE (UI-disabled, code kept) — attack at 2 x (length x tap) ---\n";
+    for (float tap : { 0.5f, 1.0f })
+        for (float len : { 1.0f, 0.5f })
+        {
+            const long t0 = 2 * bar, total = t0 + 2 * bar;
+            auto click = [t0](long i) -> float { return (i == t0) ? 1.0f : 0.0f; };
+            RunResult r = runReverse(sampleRate, blockSize, tap, total, click, len, /*lock=*/false);
+            long peak = -1; float best = 0.0f;
+            for (long g = t0 + 1; g < t0 + bar; ++g)
+            { float a = std::fabs(r.out[g]); if (a > best) { best = a; peak = g; } }
+            double delay   = (peak < 0) ? -1 : (double)(peak - t0) / spb;
+            double expect  = 2.0 * len * tap;
+            bool ok = (peak > 0) && std::fabs(delay - expect) < 0.05;
+            std::cout << "  tap=" << tap << "b len=" << len
+                      << "  attack delay=" << delay << "b (want " << expect << ")"
+                      << (ok ? "  [OK]" : "  [FAIL]") << "\n";
+            if (!ok) ++failures;
+        }
 
     std::cout << "\n=== " << (failures == 0 ? "ALL PASS" : "FAILURES")
               << " (" << failures << " failed) ===\n";

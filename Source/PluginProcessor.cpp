@@ -52,6 +52,8 @@ void EchoGridProcessor::getStateInformation(juce::MemoryBlock& destData)
         e->setAttribute("saturation",    (double)n.saturation);
         e->setAttribute("active",        n.active);
         e->setAttribute("reverse",       n.reverse);
+        e->setAttribute("reverseLength", (double)n.reverseLength);
+        e->setAttribute("reverseLock",   n.reverseLock);
     }
 
     copyXmlToBinary(root, destData);
@@ -94,6 +96,8 @@ void EchoGridProcessor::setStateInformation(const void* data, int sizeInBytes)
         n.saturation    = (float)e->getDoubleAttribute("saturation",    0.0);
         n.active        = e->getBoolAttribute("active",  true);
         n.reverse       = e->getBoolAttribute("reverse", false);
+        n.reverseLength = (float)e->getDoubleAttribute("reverseLength", 1.0);
+        n.reverseLock   = e->getBoolAttribute("reverseLock", true);
         nodes.push_back(n);
     }
 }
@@ -354,51 +358,67 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
             if (node.reverse)
             {
                 //--- Reverse delay that SWELLS INTO THE BEAT: a chunk of audio is
-                //    played back reversed (newest sample first → the attack last),
-                //    so the loud transient lands exactly at the tap position — the
-                //    same place a forward echo's attack would be — with the reversed
-                //    audio crescendoing up into it.
+                //    played back reversed (newest sample first → the attack last), so
+                //    the loud transient lands at the tap position, the reverse
+                //    crescendoing up into it.
                 //
-                //    Causality forces the trade-off that fixes the timing: a reversed
-                //    chunk can only play AFTER it's recorded, so a chunk's attack
-                //    (its oldest sample) always lands 2 chunk-lengths after it was
-                //    played.  To put that attack at the tap delay D, the chunk must
-                //    be HALF the tap (2 × D/2 = D).  So the reverse reverses tap/2-
-                //    long chunks and the attack resolves on the beat, swelling in
-                //    over the run-up to it.
+                //    REV LEN (node.reverseLength, 0..1) sets the length of each
+                //    reversed chunk; the IN-TIME / FREE toggle (node.reverseLock) sets
+                //    how that length relates to the beat:
                 //
-                //    Phase is taken from the song position so the reverse is
-                //    perfectly periodic at the tap interval (the way a real delay
-                //    repeats), with a short splice crossfade at each chunk seam. ---
+                //    • IN TIME (locked): chunk runs 0..½-tap; whatever the length, the
+                //      chunk is read one extra (D − 2·chunk) back so the attack still
+                //      lands exactly at the tap delay D.  (A reversed chunk's attack
+                //      naturally lands 2 chunk-lengths late, so 2·chunk + (D − 2·chunk)
+                //      = D.)  Shorter = a tighter, grainier reverse; full = the smooth
+                //      half-tap swell (the v20 default).
+                //
+                //    • FREE: chunk runs 0..full-tap with no shift, so the attack lands
+                //      at 2·chunk — on the beat at ½-tap, drifting later beyond that.
+                //
+                //    Chunks are phase-locked to the pattern start (barStart0) so the
+                //    reverse repeats identically every bar, with a short splice
+                //    crossfade at each chunk seam. ---
 
-                //--- chunk = HALF the tap delay (see above), floored to ~60ms so it
-                //    never buzzes.  Attack lands at 2 × chunk = the tap = on the beat. ---
-                const double Wmin   = (double)minRevWindow / samplesPerBeat;
-                const double Wbeats = juce::jmax((double)node.positionBeats * 0.5, Wmin);
-                const int    G      = juce::jmax(1, (int)std::lround(Wbeats * samplesPerBeat));
-                const int    X      = juce::jlimit(1, juce::jmax(1, G / 4), spliceXfade);
+                const double Wmin = (double)minRevWindow / samplesPerBeat;
+                const double knob = juce::jlimit(0.0, 1.0, (double)node.reverseLength);
 
-                //--- phase within the current window at this song position.  The
-                //    window is delayed by one full window so we read the PREVIOUS
-                //    (already-recorded) window, played backwards. ---
+                //--- chunk length (beats) + the extra read-back that keeps the attack
+                //    on the beat in IN-TIME mode (zero in FREE mode) ---
+                double Wbeats, shiftBeats;
+                if (node.reverseLock)
+                {
+                    Wbeats     = juce::jmax(Wmin, knob * (double)node.positionBeats * 0.5);
+                    shiftBeats = juce::jmax(0.0, (double)node.positionBeats - 2.0 * Wbeats);
+                }
+                else
+                {
+                    Wbeats     = juce::jmax(Wmin, knob * (double)node.positionBeats);
+                    shiftBeats = 0.0;
+                }
+
+                const int G     = juce::jmax(1, (int)std::lround(Wbeats * samplesPerBeat));
+                const int shift = juce::jmax(0, (int)std::lround(shiftBeats * samplesPerBeat));
+                const int X     = juce::jlimit(1, juce::jmax(1, G / 4), spliceXfade);
+
+                //--- phase within the current chunk, anchored to the pattern start ---
                 const double songBeats  = songBeats0 + (double)s / samplesPerBeat;
                 const double delRel     = songBeats - barStart0;
                 const double phaseBeats = delRel - std::floor(delRel / Wbeats) * Wbeats;
                 const int    p          = juce::jlimit(0, G - 1, (int)(phaseBeats * samplesPerBeat));
 
-                //--- read the window backwards: p=0 reads the newest sample of the
-                //    previous window, p=G-1 the oldest → true time-reversal ---
-                const int offP = juce::jlimit(1, bufSize - 1, 2 * p + 1);
+                //--- read the chunk backwards (newest→oldest), shifted so the attack
+                //    lands at the tap delay (IN TIME) or at 2·chunk (FREE) ---
+                const int offP = juce::jlimit(1, bufSize - 1, shift + 2 * p + 1);
                 const int rP   = (writePosition - offP + bufSize) % bufSize;
                 echoL = delayBuffer.getSample(0, rP);
                 echoR = (numChannels > 1) ? delayBuffer.getSample(1, rP) : echoL;
 
-                //--- seam crossfade: as a new window begins the previous window's
-                //    reverse tail (2·G older) continues OUT under it — click-free,
-                //    single stream (a second stream would ghost) ---
+                //--- seam crossfade: the previous chunk's reverse tail (2·G older)
+                //    continues OUT under the new chunk — click-free, single stream ---
                 if (p < X)
                 {
-                    const int offO = juce::jlimit(1, bufSize - 1, 2 * p + 2 * G + 1);
+                    const int offO = juce::jlimit(1, bufSize - 1, shift + 2 * p + 2 * G + 1);
                     const int rO   = (writePosition - offO + bufSize) % bufSize;
                     const float t  = (float)p / (float)X;                            // 0→1
                     const float wN = std::sin(t * juce::MathConstants<float>::halfPi); // new in

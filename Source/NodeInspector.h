@@ -25,6 +25,8 @@ private:
     juce::Label      nodeLabel;
     juce::Slider     gainSlider { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
     juce::Slider     panSlider  { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::Slider     revLenSlider { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::TextButton revLockBtn { "IN TIME" };   // toggles IN TIME / FREE
     juce::TextButton reverseBtn { "REV" };
     juce::TextButton activeBtn  { "ON" };
     juce::Label      probDisplay;
@@ -32,9 +34,9 @@ private:
     bool syncing = false;
 
     //--- multi-select delta drag tracking ---
-    bool  gainDragging = false, panDragging = false;
-    float gainRefAtStart = 0.5f, panRefAtStart = 0.0f;
-    std::vector<float> gainAtDragStart, panAtDragStart;
+    bool  gainDragging = false, panDragging = false, revLenDragging = false;
+    float gainRefAtStart = 0.5f, panRefAtStart = 0.0f, revLenRefAtStart = 1.0f;
+    std::vector<float> gainAtDragStart, panAtDragStart, revLenAtDragStart;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(NodeInspector)
 };

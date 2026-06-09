@@ -19,6 +19,13 @@ static void styleButton(juce::TextButton& b)
     b.setColour(juce::TextButton::textColourOnId,  juce::Colour(0xffe0e0ff));
 }
 
+//--- IN TIME / FREE reverse-timing toggle: DISABLED in the UI for now (it added no
+//    clear musical benefit).  The toggle, its DSP (the FREE mode in PluginProcessor)
+//    and the reverseLock node field are all kept intact — flip this flag back to
+//    true to re-expose it.  With it disabled the reverse stays in IN TIME mode
+//    (attack locked to the beat); the REV LEN knob still works. ---
+static constexpr bool kShowReverseTimingToggle = false;
+
 //==============================================================================
 NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
     : processor(p), timeline(t)
@@ -114,6 +121,65 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
     };
     addAndMakeVisible(panSlider);
 
+    //--- reverse length knob (0..1): length of the reversed segment ---
+    revLenSlider.setRange(0.0, 1.0, 0.01);
+    revLenSlider.setDoubleClickReturnValue(true, 1.0);
+    styleKnob(revLenSlider);
+    revLenSlider.onDragStart = [this]
+    {
+        revLenDragging   = true;
+        timeline.captureSnapshot();
+        revLenRefAtStart = (float)revLenSlider.getValue();
+        revLenAtDragStart.clear();
+        for (int i : timeline.getMultiSelection())
+            if (i >= 0 && i < (int)processor.nodes.size())
+                revLenAtDragStart.push_back(processor.nodes[i].reverseLength);
+    };
+    revLenSlider.onDragEnd = [this] { revLenDragging = false; timeline.pushUndoIfChanged(); };
+    revLenSlider.onValueChange = [this]
+    {
+        if (syncing) return;
+        float val = (float)revLenSlider.getValue();
+        int   idx = timeline.getSelectedIndex();
+        const auto& sel = timeline.getMultiSelection();
+        const juce::ScopedLock sl(processor.getCallbackLock());
+        if (sel.size() <= 1)
+        {
+            if (idx >= 0 && idx < (int)processor.nodes.size())
+                processor.nodes[idx].reverseLength = val;
+        }
+        else
+        {
+            float delta = val - revLenRefAtStart;
+            for (int k = 0; k < (int)std::min(sel.size(), revLenAtDragStart.size()); ++k)
+                if (sel[k] >= 0 && sel[k] < (int)processor.nodes.size())
+                    processor.nodes[sel[k]].reverseLength = juce::jlimit(0.0f, 1.0f, revLenAtDragStart[k] + delta);
+        }
+        timeline.repaint();
+    };
+    addAndMakeVisible(revLenSlider);
+
+    //--- IN TIME / FREE toggle: whether the reverse length stays locked to the beat ---
+    styleButton(revLockBtn);
+    revLockBtn.setClickingTogglesState(true);
+    revLockBtn.onClick = [this]
+    {
+        if (syncing) return;
+        const auto& sel = timeline.getMultiSelection();
+        if (sel.empty()) return;
+        timeline.captureSnapshot();
+        bool locked = revLockBtn.getToggleState();
+        revLockBtn.setButtonText(locked ? "IN TIME" : "FREE");
+        {
+            const juce::ScopedLock sl(processor.getCallbackLock());
+            for (int i : sel)
+                if (i >= 0 && i < (int)processor.nodes.size())
+                    processor.nodes[i].reverseLock = locked;
+        }
+        timeline.pushUndoIfChanged();
+    };
+    if (kShowReverseTimingToggle) addAndMakeVisible(revLockBtn);
+
     //--- reverse button ---
     styleButton(reverseBtn);
     reverseBtn.setClickingTogglesState(true);
@@ -188,6 +254,8 @@ void NodeInspector::resized()
     nodeLabel.setBounds(10,  cy - 18, 82, 36);
     gainSlider.setBounds(104, cy - kw / 2, kw, kw);
     panSlider.setBounds(172,  cy - kw / 2, kw, kw);
+    revLenSlider.setBounds(248, cy - kw / 2, kw, kw);
+    if (kShowReverseTimingToggle) revLockBtn.setBounds(316, cy - bh / 2, 64, bh);
     reverseBtn.setBounds(450, cy - bh / 2, bw, bh);
     activeBtn.setBounds(512,  cy - bh / 2, bw, bh);
     probDisplay.setBounds(574, cy - bh / 2, 78, bh);
@@ -226,8 +294,12 @@ void NodeInspector::paint(juce::Graphics& g)
                    juce::Justification::centredLeft);
     };
 
+    bool isRev = (idx >= 0 && idx < (int)processor.nodes.size() && processor.nodes[idx].reverse);
+
     labelAbove(gainSlider.getBounds(), "GAIN");
     labelAbove(panSlider.getBounds(),  "PAN");
+    if (isRev)    labelAbove(revLenSlider.getBounds(), "REV LEN");
+    if (isRev && kShowReverseTimingToggle) labelAbove(revLockBtn.getBounds(), "TIMING");
     if (idx >= 0) labelAbove(reverseBtn.getBounds(), "MODE");
     if (idx >= 0) labelAbove(probDisplay.getBounds(), "PROB");
 
@@ -250,6 +322,9 @@ void NodeInspector::paint(juce::Graphics& g)
                                        : "R " + juce::String( pan, 2);
     valueBelow(panSlider.getBounds(), panStr);
 
+    if (isRev)
+        valueBelow(revLenSlider.getBounds(),
+                   juce::String((int)std::round((float)revLenSlider.getValue() * 100.0f)) + "%");
 }
 
 //==============================================================================
@@ -265,9 +340,14 @@ void NodeInspector::syncFromProcessor(int idx)
     bool isDry  = (idx == -2);
     bool isEcho = (idx >= 0 && idx < (int)processor.nodes.size());
 
+    //--- the reverse-shaping controls only matter when this node is in reverse mode ---
+    bool isRev = isEcho && processor.nodes[idx].reverse;
+
     //--- show/hide ---
     gainSlider.setVisible(isDry || isEcho);
     panSlider.setVisible(isDry || isEcho);
+    revLenSlider.setVisible(isRev);
+    revLockBtn.setVisible(isRev && kShowReverseTimingToggle);
     reverseBtn.setVisible(isEcho);
     activeBtn.setVisible(isEcho);
     probDisplay.setVisible(isEcho);
@@ -288,6 +368,9 @@ void NodeInspector::syncFromProcessor(int idx)
                           juce::dontSendNotification);
         if (!gainDragging) gainSlider.setValue(n.gain, juce::dontSendNotification);
         if (!panDragging)  panSlider.setValue(n.pan,  juce::dontSendNotification);
+        if (!revLenDragging) revLenSlider.setValue(n.reverseLength, juce::dontSendNotification);
+        revLockBtn.setToggleState(n.reverseLock, juce::dontSendNotification);
+        revLockBtn.setButtonText(n.reverseLock ? "IN TIME" : "FREE");
         reverseBtn.setToggleState(n.reverse, juce::dontSendNotification);
         activeBtn.setToggleState(n.active,   juce::dontSendNotification);
         probDisplay.setText(juce::String((int)std::round(n.probability * 100)) + "%",

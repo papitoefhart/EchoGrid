@@ -28,6 +28,13 @@ struct EchoNode
     bool  active        = true;
     bool  reverse       = false;
 
+    //--- reverse shaping (only used when reverse == true).  Appended AFTER the
+    //    existing fields so the positional EchoNode{...} inits in the processor
+    //    still match by position (new fields fall back to these defaults). ---
+    float reverseLength = 1.0f;   // 0..1: length of the reversed segment
+    bool  reverseLock   = true;   // true = attack stays on the beat (length ≤ ½ tap);
+                                  // false = length runs free (attack can drift late)
+
     bool operator==(const EchoNode& o) const
     {
         return std::memcmp(&positionBeats, &o.positionBeats, sizeof(float)) == 0
@@ -35,7 +42,9 @@ struct EchoNode
             && std::memcmp(&pan,           &o.pan,           sizeof(float)) == 0
             && std::memcmp(&probability,   &o.probability,   sizeof(float)) == 0
             && std::memcmp(&saturation,    &o.saturation,    sizeof(float)) == 0
-            && active == o.active && reverse == o.reverse;
+            && std::memcmp(&reverseLength, &o.reverseLength, sizeof(float)) == 0
+            && active == o.active && reverse == o.reverse
+            && reverseLock == o.reverseLock;
     }
     bool operator!=(const EchoNode& o) const { return !(*this == o); }
 };
