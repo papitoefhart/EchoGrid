@@ -1,6 +1,6 @@
 #include "PluginEditor.h"
 
-static constexpr int kBuildVersion = 17;
+static constexpr int kBuildVersion = 20;
 
 //==============================================================================
 // Musical subdivision options — label shown in ComboBox, beats = snap step in beats

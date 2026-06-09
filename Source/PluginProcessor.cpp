@@ -220,17 +220,17 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 {
     juce::ScopedNoDenormals noDenormals;
 
-    //--- get host BPM + song position + bar start (fall back to 120 BPM / free) ---
+    //--- get host BPM + song position (fall back to 120 BPM / free-run) ---
     double bpm          = 120.0;
     double hostPpq      = 0.0;
-    double hostBarStart = 0.0;
     bool   havePpq      = false;
+    bool   isPlaying    = false;
     if (auto* ph = getPlayHead())
         if (auto pos = ph->getPosition())
         {
-            if (auto b  = pos->getBpm())                       bpm     = *b;
-            if (auto q  = pos->getPpqPosition())             { hostPpq = *q; havePpq = true; }
-            if (auto bs = pos->getPpqPositionOfLastBarStart()) hostBarStart = *bs;
+            if (auto b  = pos->getBpm())             bpm     = *b;
+            if (auto q  = pos->getPpqPosition())   { hostPpq = *q; havePpq = true; }
+            isPlaying = pos->getIsPlaying();
         }
 
     const int    numSamples  = buffer.getNumSamples();
@@ -241,19 +241,29 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
     const double samplesPerBeat = (60.0 / bpm) * currentSampleRate;
 
-    //--- song position in beats at the start of this block, used to lock reverse
-    //    windows to the host grid.  Fall back to a free-running counter when the
-    //    host supplies no play position (e.g. some standalone/offline cases). ---
-    const double songBeats0 = havePpq ? hostPpq : fallbackBeats;
-    const double barStart0  = havePpq ? hostBarStart : 0.0;   // anchor reverse to the bar
+    //--- song position in beats at the start of this block, used to phase-lock the
+    //    reverse chunks.  While the transport is rolling we follow the host
+    //    (deterministic, grid-aligned); when it's stopped (e.g. playing live with no
+    //    transport) the host freezes its ppq, so we fall back to a free-running
+    //    counter that keeps advancing every block. ---
+    const bool   useHostPos = havePpq && isPlaying;
+    const double songBeats0 = useHostPos ? hostPpq : fallbackBeats;
 
-    //--- minimum reverse grain length (~60 ms): the floor that stops a reverse
-    //    tap from collapsing into buzz as it approaches the dry.  Grain length
+    //--- start of the current PATTERN (every gridLengthBeats), the anchor the
+    //    reverse chunks re-sync to.  Anchoring to the pattern (not song-start) keeps
+    //    the reverse identical every bar for ANY tap position — without it, chunks
+    //    whose length doesn't divide the pattern drift bar-to-bar and land in the
+    //    wrong place (or nowhere).  The pattern downbeat is always a chunk edge. ---
+    const double patBeats   = juce::jmax(0.25, (double)gridLengthBeats);
+    const double barStart0  = std::floor(songBeats0 / patBeats) * patBeats;
+
+    //--- minimum reverse window length (~60 ms): the floor that stops a reverse
+    //    tap from collapsing into buzz as it approaches the dry.  The window
     //    follows the tap delay but never drops below this. ---
-    const int minRevGrain = juce::jmax(1, (int)(0.060 * currentSampleRate));
+    const int minRevWindow = juce::jmax(1, (int)(0.060 * currentSampleRate));
 
     //--- reverse splice crossfade length (~4 ms): short seam fade that de-clicks
-    //    grain boundaries without a second stream (which would ghost). ---
+    //    window boundaries without a second stream (which would ghost). ---
     const int spliceXfade = juce::jmax(1, (int)(0.004 * currentSampleRate));
 
     //--- cache a finite tail length for the host: the longest active echo delay.
@@ -343,51 +353,52 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
             if (node.reverse)
             {
-                //--- Reverse delay (Crystallizer-style, decoupled):
-                //    the tap POSITION is the delay (when the echo lands — exactly
-                //    like a forward tap), and the GRAIN length is the GRID
-                //    subdivision (what gets reversed).  Decoupling these two is what
-                //    makes the reverse land where you place the tap.  The delayed
-                //    audio is read backwards in grains of L, anchored to the bar so
-                //    it repeats every bar, with a short splice crossfade per seam. ---
-                double Lbeats = (double)snapStepBeats;                  // grain = grid step
-                const double Lmin = (double)minRevGrain / samplesPerBeat;
-                if (Lbeats < Lmin) Lbeats = Lmin;                       // floor (no buzz)
+                //--- Reverse delay that SWELLS INTO THE BEAT: a chunk of audio is
+                //    played back reversed (newest sample first → the attack last),
+                //    so the loud transient lands exactly at the tap position — the
+                //    same place a forward echo's attack would be — with the reversed
+                //    audio crescendoing up into it.
+                //
+                //    Causality forces the trade-off that fixes the timing: a reversed
+                //    chunk can only play AFTER it's recorded, so a chunk's attack
+                //    (its oldest sample) always lands 2 chunk-lengths after it was
+                //    played.  To put that attack at the tap delay D, the chunk must
+                //    be HALF the tap (2 × D/2 = D).  So the reverse reverses tap/2-
+                //    long chunks and the attack resolves on the beat, swelling in
+                //    over the run-up to it.
+                //
+                //    Phase is taken from the song position so the reverse is
+                //    perfectly periodic at the tap interval (the way a real delay
+                //    repeats), with a short splice crossfade at each chunk seam. ---
 
-                //--- snap grain to an integer division of the bar (clean tiling) ---
-                const int    nG     = juce::jmax(1, (int)std::lround(gridLengthBeats / Lbeats));
-                Lbeats              = (double)gridLengthBeats / (double)nG;
-                const int    G      = juce::jmax(1, (int)std::lround(Lbeats * samplesPerBeat));
-
-                //--- delay = tap position, but at least one grain so the reverse is
-                //    causal (we can only reverse audio already recorded) ---
-                const double Pd     = juce::jmax((double)node.positionBeats, Lbeats);
-                const int    Ds     = (int)std::lround(Pd * samplesPerBeat);
+                //--- chunk = HALF the tap delay (see above), floored to ~60ms so it
+                //    never buzzes.  Attack lands at 2 × chunk = the tap = on the beat. ---
+                const double Wmin   = (double)minRevWindow / samplesPerBeat;
+                const double Wbeats = juce::jmax((double)node.positionBeats * 0.5, Wmin);
+                const int    G      = juce::jmax(1, (int)std::lround(Wbeats * samplesPerBeat));
                 const int    X      = juce::jlimit(1, juce::jmax(1, G / 4), spliceXfade);
 
-                //--- reversal inherently plays the grain back over the next grain, so
-                //    its onset lands one grain (G) late.  Subtract G from the delay so
-                //    the reverse onset matches a forward tap at the same position. ---
-                const int    Deff   = Ds - G;
-
-                //--- phase within the grain at the DELAYED bar position, anchored to
-                //    the bar so every bar is identical ---
+                //--- phase within the current window at this song position.  The
+                //    window is delayed by one full window so we read the PREVIOUS
+                //    (already-recorded) window, played backwards. ---
                 const double songBeats  = songBeats0 + (double)s / samplesPerBeat;
-                const double delRel     = (songBeats - Pd) - barStart0;
-                const double phaseBeats = delRel - std::floor(delRel / Lbeats) * Lbeats;
+                const double delRel     = songBeats - barStart0;
+                const double phaseBeats = delRel - std::floor(delRel / Wbeats) * Wbeats;
                 const int    p          = juce::jlimit(0, G - 1, (int)(phaseBeats * samplesPerBeat));
 
-                //--- read backwards within the grain (2·p+1), shifted by the delay ---
-                const int offP = juce::jlimit(1, bufSize - 1, Deff + 2 * p + 1);
+                //--- read the window backwards: p=0 reads the newest sample of the
+                //    previous window, p=G-1 the oldest → true time-reversal ---
+                const int offP = juce::jlimit(1, bufSize - 1, 2 * p + 1);
                 const int rP   = (writePosition - offP + bufSize) % bufSize;
                 echoL = delayBuffer.getSample(0, rP);
                 echoR = (numChannels > 1) ? delayBuffer.getSample(1, rP) : echoL;
 
-                //--- seam crossfade: new grain IN while previous grain's tail
-                //    (offset + 2·G) continues OUT — click-free, no ghost ---
+                //--- seam crossfade: as a new window begins the previous window's
+                //    reverse tail (2·G older) continues OUT under it — click-free,
+                //    single stream (a second stream would ghost) ---
                 if (p < X)
                 {
-                    const int offO = juce::jlimit(1, bufSize - 1, Deff + 2 * p + 2 * G + 1);
+                    const int offO = juce::jlimit(1, bufSize - 1, 2 * p + 2 * G + 1);
                     const int rO   = (writePosition - offO + bufSize) % bufSize;
                     const float t  = (float)p / (float)X;                            // 0→1
                     const float wN = std::sin(t * juce::MathConstants<float>::halfPi); // new in

@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 #include <cmath>
+#include <functional>
 
 //==============================================================================
 // Mock PlayHead: advances ppqPosition correctly with each block
@@ -24,8 +25,8 @@ public:
     {
         PositionInfo info;
         info.setBpm(bpm_);
+        info.setIsPlaying(true);
         info.setPpqPosition(ppqPos_);
-        //--- report the downbeat of the current bar, like a real DAW ---
         info.setPpqPositionOfLastBarStart(std::floor(ppqPos_ / barBeats_) * barBeats_);
         info.setTimeSignature(juce::AudioPlayHead::TimeSignature{ 4, 4 });
         return info;
@@ -33,254 +34,169 @@ public:
 };
 
 //==============================================================================
+// Drive the REAL processor with the dry muted and a single reverse tap.  Input
+// is supplied by input(globalSample).  Returns the full output (channel 0) and
+// the exact input that was fed, both indexed by global sample, so a test can
+// compare the reverse output against the input it should mirror.
 //==============================================================================
-// Bar-consistency test: feed ONE impulse at a chosen global sample (i.e. a chosen
-// bar + bar-relative offset) during continuous playback from ppq=0, and return the
-// global sample index of the reverse peak.  Mirrors the real DAW scenario.
-//==============================================================================
-static int reversePeakForImpulseAt(double sampleRate, int blockSize,
-                                   float positionBeats, float gridBeats,
-                                   long impulseGlobalSample, long totalSamples)
+struct RunResult { std::vector<float> out, in; };
+
+static RunResult runReverse(double sampleRate, int blockSize, float positionBeats,
+                            long totalSamples, const std::function<float(long)>& input)
 {
     EchoGridProcessor proc;
     proc.prepareToPlay(sampleRate, blockSize);
-    proc.dry.gain         = 0.0f;
-    proc.gridLengthBeats  = gridBeats;
-
-    proc.nodes.clear();
-    EchoNode n;
-    n.positionBeats = positionBeats; n.gain = 1.0f; n.pan = 0.0f;
-    n.probability = 1.0f; n.saturation = 0.0f; n.active = true; n.reverse = true;
-    proc.nodes.push_back(n);
-
-    MockPlayHead head;
-    head.bpm_ = 120.0; head.sampleRate_ = sampleRate; head.blockSize_ = blockSize;
-    head.barBeats_ = gridBeats; head.ppqPos_ = 0.0;
-    proc.setPlayHead(&head);
-
-    juce::AudioBuffer<float> buf(2, blockSize);
-    juce::MidiBuffer midi;
-
-    long g = 0;                    // global sample counter
-    float bestAbs = 0.0f; long bestIdx = -1;
-    const long nBlocks = (totalSamples + blockSize - 1) / blockSize;
-    for (long b = 0; b < nBlocks; ++b)
-    {
-        buf.clear();
-        //--- drop the impulse into whatever block contains impulseGlobalSample ---
-        if (impulseGlobalSample >= g && impulseGlobalSample < g + blockSize)
-        {
-            int off = (int)(impulseGlobalSample - g);
-            buf.setSample(0, off, 1.0f);
-            buf.setSample(1, off, 1.0f);
-        }
-        proc.processBlock(buf, midi);
-        head.advanceBlock();
-
-        for (int s = 0; s < blockSize; ++s, ++g)
-        {
-            //--- only look AFTER the impulse for the reverse response ---
-            if (g <= impulseGlobalSample) continue;
-            float a = std::abs(buf.getSample(0, s));
-            if (a > bestAbs) { bestAbs = a; bestIdx = g; }
-        }
-    }
-    return (int)bestIdx;
-}
-
-//==============================================================================
-// Dump the FULL reverse response to one impulse: lists every output burst and its
-// bar-relative position, so we can see if one input makes several echoes.
-//==============================================================================
-static void dumpImpulseResponse(double sampleRate, int blockSize,
-                                float positionBeats, float gridBeats,
-                                long impulseGlobalSample, long totalSamples)
-{
-    const double spb        = sampleRate * 60.0 / 120.0;
-    const long   barSamples = (long)(gridBeats * spb);
-
-    EchoGridProcessor proc;
-    proc.prepareToPlay(sampleRate, blockSize);
-    proc.dry.gain = 0.0f; proc.gridLengthBeats = gridBeats;
+    proc.dry.gain = 0.0f;
+    proc.gridLengthBeats = 4.0f;
     proc.nodes.clear();
     EchoNode n; n.positionBeats = positionBeats; n.gain = 1.0f; n.pan = 0.0f;
     n.probability = 1.0f; n.saturation = 0.0f; n.active = true; n.reverse = true;
     proc.nodes.push_back(n);
+
     MockPlayHead head; head.bpm_ = 120.0; head.sampleRate_ = sampleRate;
-    head.blockSize_ = blockSize; head.barBeats_ = gridBeats; head.ppqPos_ = 0.0;
+    head.blockSize_ = blockSize; head.barBeats_ = 4.0; head.ppqPos_ = 0.0;
     proc.setPlayHead(&head);
 
+    RunResult r;
+    r.out.reserve(totalSamples); r.in.reserve(totalSamples);
     juce::AudioBuffer<float> buf(2, blockSize); juce::MidiBuffer midi;
-    long g = 0; const long nBlocks = (totalSamples + blockSize - 1) / blockSize;
-    bool inBurst = false; long burstStart = 0; float burstPeak = 0.0f;
-    std::cout << "  impulse at sample " << impulseGlobalSample
-              << " (ppq " << (impulseGlobalSample / spb) << ", bar-rel "
-              << (impulseGlobalSample % barSamples) << ") -> reverse bursts:\n";
-    for (long b = 0; b < nBlocks; ++b)
-    {
-        buf.clear();
-        if (impulseGlobalSample >= g && impulseGlobalSample < g + blockSize)
-            { int o = (int)(impulseGlobalSample - g); buf.setSample(0,o,1.0f); buf.setSample(1,o,1.0f); }
-        proc.processBlock(buf, midi); head.advanceBlock();
-        for (int s = 0; s < blockSize; ++s, ++g)
-        {
-            float a = (g > impulseGlobalSample) ? std::abs(buf.getSample(0, s)) : 0.0f;
-            if (a > 0.05f && !inBurst) { inBurst = true; burstStart = g; burstPeak = a; }
-            else if (a > 0.05f) burstPeak = std::max(burstPeak, a);
-            else if (inBurst && a <= 0.05f)
-            {
-                inBurst = false;
-                std::cout << "    burst @ sample " << burstStart
-                          << "  bar-rel " << (burstStart % barSamples)
-                          << "  (ppq " << (burstStart / spb)
-                          << ", beat " << (1.0 + std::fmod(burstStart / spb, gridBeats))
-                          << ")  peak " << burstPeak << "\n";
-            }
-        }
-    }
-}
 
-//==============================================================================
-// Realistic test: feed an EXTENDED burst (e.g. an 8th-note-long sound) at the same
-// bar-relative spot in consecutive bars and report the reverse ONSET bar-relative.
-//==============================================================================
-static long reverseOnsetForBurst(double sampleRate, int blockSize,
-                                 float positionBeats, float gridBeats,
-                                 long burstStartSample, long burstLenSamples,
-                                 long totalSamples, float dawBarBeats = -1.0f,
-                                 float snapStep = 0.25f, bool reverse = true)
-{
-    EchoGridProcessor proc;
-    proc.prepareToPlay(sampleRate, blockSize);
-    proc.dry.gain = 0.0f; proc.gridLengthBeats = gridBeats; proc.snapStepBeats = snapStep;
-    proc.nodes.clear();
-    EchoNode n; n.positionBeats = positionBeats; n.gain = 1.0f; n.pan = 0.0f;
-    n.probability = 1.0f; n.saturation = 0.0f; n.active = true; n.reverse = reverse;
-    proc.nodes.push_back(n);
-    MockPlayHead head; head.bpm_ = 120.0; head.sampleRate_ = sampleRate;
-    head.blockSize_ = blockSize;
-    head.barBeats_ = (dawBarBeats > 0.0f) ? dawBarBeats : gridBeats;  // DAW time-sig bar
-    head.ppqPos_ = 0.0;
-    proc.setPlayHead(&head);
-
-    juce::AudioBuffer<float> buf(2, blockSize); juce::MidiBuffer midi;
     long g = 0; const long nBlocks = (totalSamples + blockSize - 1) / blockSize;
-    const long burstEnd = burstStartSample + burstLenSamples;
     for (long b = 0; b < nBlocks; ++b)
     {
         buf.clear();
         for (int s = 0; s < blockSize; ++s)
         {
-            long gs = g + s;
-            if (gs >= burstStartSample && gs < burstEnd)
-            {
-                //--- ramp so the reversed copy is easy to localise ---
-                float v = 0.3f + 0.7f * (float)(gs - burstStartSample) / (float)burstLenSamples;
-                buf.setSample(0, s, v); buf.setSample(1, s, v);
-            }
+            float v = input(g + s);
+            buf.setSample(0, s, v); buf.setSample(1, s, v);
         }
         proc.processBlock(buf, midi); head.advanceBlock();
         for (int s = 0; s < blockSize; ++s, ++g)
         {
-            if (g < burstEnd) continue;          // ignore the burst region itself
-            if (std::abs(buf.getSample(0, s)) > 0.05f) return g;   // first reverse output
+            r.in.push_back(input(g));               // re-evaluate: matches what was fed
+            r.out.push_back(buf.getSample(0, s));
         }
     }
-    return -1;
+    return r;
 }
 
+//==============================================================================
 int main()
 {
     const double sampleRate = 4000.0;
     const int    blockSize  = 64;
     const double bpm        = 120.0;
     const double spb        = sampleRate * 60.0 / bpm;   // samples per beat
-    const float  gridBeats  = 4.0f;                       // one 4/4 bar
-    const long   barSamples = (long)(gridBeats * spb);
+    const long   bar        = (long)std::lround(4.0 * spb);   // pattern = gridLengthBeats(4)
+    int failures = 0;
 
-    std::cout << "=== Reverse bar-consistency diagnostic ===\n";
-    std::cout << "sampleRate=" << sampleRate << " bpm=" << bpm
-              << " samplesPerBeat=" << spb << " bar=" << barSamples << " samples\n";
-    std::cout << "Feeding the SAME bar-relative impulse in bars 2..5, measuring the\n"
-              << "reverse peak's BAR-RELATIVE position. If correct, all rows match.\n\n";
+    std::cout << "=== True reverse-delay tests (sr=" << sampleRate
+              << ", spb=" << spb << ") ===\n\n";
 
-    //--- test several tap positions: some divide the 4-beat bar, some don't ---
-    float taps[]      = { 0.5f, 1.0f, 0.75f, 1.5f };
-    float relOffsets[]= { 0.0f, 1.0f };   // bar-relative beat where the impulse is fed
-
-    for (float relOff : relOffsets)
+    //--------------------------------------------------------------------------
+    // TEST 1 — Attack lands ON THE BEAT: the loud transient of a reversed note
+    // must come back at the TAP DELAY (where a forward echo's attack would be),
+    // with the reverse swelling up into it.  The hit is on a PATTERN DOWNBEAT
+    // (the reverse is bar-locked, so the downbeat is always a chunk edge).
+    //--------------------------------------------------------------------------
+    std::cout << "--- Test 1: attack lands at the tap delay ---\n";
+    for (float tap : { 0.5f, 1.0f, 1.5f, 2.0f, 3.0f })
     {
-        std::cout << "--- impulse at bar-relative beat " << relOff << " ---\n";
-        for (float tap : taps)
+        const long t0    = 2 * bar;                                // a pattern downbeat
+        const long total = t0 + 2 * bar;
+        auto click = [t0](long i) -> float { return (i == t0) ? 1.0f : 0.0f; };
+        RunResult r = runReverse(sampleRate, blockSize, tap, total, click);
+
+        long peak = -1; float best = 0.0f;
+        for (long g = t0 + 1; g < t0 + bar; ++g)                    // within the bar
         {
-            std::cout << "  tap=" << tap << "b : ";
-            int firstRel = -1; bool consistent = true;
-            for (int bar = 1; bar <= 4; ++bar)   // bars 2..5 (index 1..4)
-            {
-                long impulse = (long)((bar * gridBeats + relOff) * spb);
-                long total   = impulse + (long)(8 * spb);   // 8 beats of tail
-                int  peak    = reversePeakForImpulseAt(sampleRate, blockSize,
-                                                       tap, gridBeats, impulse, total);
-                int  rel     = (peak < 0) ? -1 : (int)(peak % barSamples);
-                std::cout << "bar" << (bar + 1) << "=" << rel << "  ";
-                if (bar == 1) firstRel = rel;
-                else if (rel < 0 || std::abs(rel - firstRel) > 2) consistent = false;
-            }
-            std::cout << (consistent ? " [CONSISTENT]" : " [VARIES <-- BUG]") << "\n";
+            float a = std::fabs(r.out[g]);
+            if (a > best) { best = a; peak = g; }
         }
-        std::cout << "\n";
+        double delay = (peak < 0) ? -1 : (double)(peak - t0) / spb;
+        bool ok = (peak > 0) && std::fabs(delay - tap) < 0.03;
+        std::cout << "  tap=" << tap << "b  attack delay=" << delay << "b"
+                  << (ok ? "  [OK]" : "  [FAIL]") << "\n";
+        if (!ok) ++failures;
     }
 
-    //--- full impulse response: how many echoes does ONE input make, and where? ---
-    std::cout << "=== Full reverse response to a SINGLE impulse ===\n";
-    for (float tap : { 0.5f, 1.5f })
-    {
-        std::cout << "tap=" << tap << "b:\n";
-        dumpImpulseResponse(sampleRate, blockSize, tap, gridBeats,
-                            (long)(2 * gridBeats * spb), (long)(2 * gridBeats * spb) + (long)(12 * spb));
-    }
-
-    //--- REALISTIC + POSITION: does the reverse land at input + tap delay, like a
-    //    forward tap?  44.1kHz / 512-block / 8th-note sample, GRID=1/8 ---
-    std::cout << "\n=== Position check: reverse onset vs forward onset (44.1k, GRID=1/8) ===\n";
-    std::cout << "(reverse should land at the SAME delay as forward = input + tap)\n";
-    const double sr2 = 44100.0; const int bs2 = 512;
-    const double spb2 = sr2 * 60.0 / 120.0;
-    const long   bar2s = (long)(gridBeats * spb2);
-    const long   eighth = (long)(0.5 * spb2);            // 8th note length in samples
-    const float  gridStep = 0.5f;                         // GRID = 1/8 note
+    //--------------------------------------------------------------------------
+    // TEST 2 — Reverses INTO the attack: audio plays back time-reversed, so a
+    // marker played LATER than the attack must come out EARLIER (the swell leads
+    // up to the attack).  Feed a loud click (attack) then a quieter marker click
+    // a little later; the marker's output peak must precede the attack's, and the
+    // attack must still land at the tap delay.
+    //--------------------------------------------------------------------------
+    std::cout << "\n--- Test 2: reverses into the attack (later input -> earlier output) ---\n";
     for (float tap : { 0.5f, 1.0f, 1.5f, 2.0f })
     {
-        long burst = (long)(2 * gridBeats * spb2);        // downbeat of bar 3
-        long tail  = burst + (long)(8 * spb2);
-        long fOn = reverseOnsetForBurst(sr2, bs2, tap, gridBeats, burst, eighth, tail,
-                                        -1.0f, gridStep, /*reverse=*/false);
-        long rOn = reverseOnsetForBurst(sr2, bs2, tap, gridBeats, burst, eighth, tail,
-                                        -1.0f, gridStep, /*reverse=*/true);
-        double fDelay = (fOn < 0) ? -1 : (double)(fOn - burst) / spb2;
-        double rDelay = (rOn < 0) ? -1 : (double)(rOn - burst) / spb2;
-        bool ok = (fOn > 0 && rOn > 0 && std::abs(fDelay - rDelay) < 0.03);
-        std::cout << "  tap=" << tap << "b : forward delay=" << fDelay
-                  << "b  reverse delay=" << rDelay << "b"
-                  << (ok ? "  [MATCH]" : "  [MISMATCH <-- BUG]") << "\n";
+        const long G     = (long)std::lround((double)tap * 0.5 * spb);  // reversed chunk
+        const long t0    = 2 * bar;                                     // a pattern downbeat
+        const long delta = G / 2;                                       // marker after attack
+        const long total = t0 + 2 * bar;
+        auto sig = [t0, delta](long i) -> float {
+            if (i == t0)         return 1.0f;    // attack
+            if (i == t0 + delta) return 0.7f;    // later marker
+            return 0.0f;
+        };
+        RunResult r = runReverse(sampleRate, blockSize, tap, total, sig);
+
+        //--- attack = global peak; marker = peak before it ---
+        long gA = -1; float bA = 0.0f;
+        for (long g = t0 + 1; g < t0 + bar; ++g)
+        { float a = std::fabs(r.out[g]); if (a > bA) { bA = a; gA = g; } }
+
+        long gB = -1; float bB = 0.0f;
+        for (long g = t0 + 1; g < gA - 8; ++g)
+        { float a = std::fabs(r.out[g]); if (a > bB) { bB = a; gB = g; } }
+
+        double attackDelay = (gA < 0) ? -1 : (double)(gA - t0) / spb;
+        bool ok = (gA > 0) && (gB > 0) && (gB < gA)
+                  && std::fabs(attackDelay - tap) < 0.03
+                  && std::labs((gA - gB) - delta) < std::max<long>(8, G / 20);
+        std::cout << "  tap=" << tap << "b  attack@delay " << attackDelay
+                  << "b  marker " << (gA - gB) << " samples earlier (want " << delta << ")"
+                  << (ok ? "  [OK]" : "  [FAIL]") << "\n";
+        if (!ok) ++failures;
     }
 
-    //--- bar-consistency still holds with the new scheme ---
-    std::cout << "\n=== Bar-consistency (new scheme, GRID=1/8) ===\n";
-    for (float tap : { 0.5f, 1.0f, 1.5f })
+    //--------------------------------------------------------------------------
+    // TEST 3 — Bar-to-bar consistency (this is the reported "beat 4 / off-grid"
+    // bug).  Feed the SAME pattern-relative hit on the downbeat of consecutive
+    // bars; the reverse attack must land at the SAME pattern-relative spot every
+    // bar — AND at the tap delay — including tap positions whose chunk (tap/2)
+    // does NOT divide the bar (beat 4 = 3b, and the 16ths 3.25/3.5/3.75).
+    //--------------------------------------------------------------------------
+    std::cout << "\n--- Test 3: reverse lands in the same spot (= tap delay) every bar ---\n";
+    for (float tap : { 1.0f, 2.0f, 3.0f, 3.25f, 3.5f, 3.75f })   // beat2,3,4 + 4e,4+,4a
     {
-        std::cout << "  tap=" << tap << "b : ";
-        long first = -1; bool ok = true;
-        for (int bar = 1; bar <= 4; ++bar)
+        long firstRel = -1; bool consistent = true;
+        for (int b = 2; b <= 5; ++b)
         {
-            long burst = (long)(bar * gridBeats * spb2);
-            long onset = reverseOnsetForBurst(sr2, bs2, tap, gridBeats, burst, eighth,
-                                              burst + (long)(8 * spb2), -1.0f, gridStep, true);
-            long rel = (onset < 0) ? -1 : (onset % bar2s);
-            std::cout << "bar" << (bar+1) << "=" << rel << "  ";
-            if (bar == 1) first = rel; else if (onset < 0 || std::labs(rel - first) > 4) ok = false;
+            const long impulse = (long)b * bar;                  // downbeat of bar b
+            const long total   = impulse + 2 * bar;
+            auto click = [impulse](long i) -> float { return (i == impulse) ? 1.0f : 0.0f; };
+            RunResult r = runReverse(sampleRate, blockSize, tap, total, click);
+
+            long peak = -1; float best = 0.0f;
+            for (long g = impulse + 1; g < impulse + bar; ++g)   // within the bar
+            { float a = std::fabs(r.out[g]); if (a > best) { best = a; peak = g; } }
+
+            long rel = (peak < 0) ? -1 : (peak % bar);
+            if (b == 2) firstRel = rel;
+            else if (rel < 0 || std::labs(rel - firstRel) > 40) consistent = false;
         }
-        std::cout << (ok ? " [CONSISTENT]" : " [VARIES <-- BUG]") << "\n";
+        //--- the attack should land one tap delay after the downbeat ---
+        const long expectRel = (long)std::lround((double)tap * spb);
+        bool onTime = (firstRel >= 0) && std::labs(firstRel - expectRel) < 60;
+        bool ok = consistent && onTime;
+        std::cout << "  tap=" << tap << "b (slider 'beat " << (tap + 1.0f)
+                  << "')  reverse @ bar-rel " << firstRel << " (want " << expectRel << ")"
+                  << (ok ? "  [OK]" : (consistent ? "  [WRONG SPOT]" : "  [VARIES <-- BUG]")) << "\n";
+        if (!ok) ++failures;
     }
-    return 0;
+
+    std::cout << "\n=== " << (failures == 0 ? "ALL PASS" : "FAILURES")
+              << " (" << failures << " failed) ===\n";
+    return failures == 0 ? 0 : 1;
 }
