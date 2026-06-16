@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  :root{
+    --ink:#33333a;          /* anthracite — all words */
+    --ink2:#87838d;
+    --ink3:#b4afba;
+    --lilac:#c2a4d6;        /* primary · gain / level */
+    --lilac-soft:#dcccea;
+    --lilac-deep:#a981c6;   /* deeper lilac for emphasis */
+    --pink:#ffafcc;         /* secondary · sat / drive */
+    --pink-soft:#ffc8dd;
+    --blue:#a2d2ff;         /* secondary · pan / filters */
+    --blue-soft:#bde0fe;
+    --shadow:#c2a4d6;
+    --line:#efeaf3;
+    --line2:#e7e0ee;
+    --card:#ffffff;
+  }
+  html,body{ width:1180px; height:680px; }
+  body{
+    font-family:-apple-system,"SF Pro Text",system-ui,sans-serif;
+    background:radial-gradient(120% 120% at 28% 0%, #fdf5fa 0%, #eef0fb 100%);
+    display:flex; align-items:center; justify-content:center;
+    color:var(--ink);
+  }
+  .plugin{
+    width:1100px; height:600px;
+    background:#fffdff;
+    border:1px solid #efe7f1;
+    border-radius:22px;
+    box-shadow:0 30px 70px -30px rgba(90,70,120,.26), 0 2px 6px rgba(90,70,120,.05);
+    padding:22px 26px;
+    display:flex; flex-direction:column; gap:18px;
+  }
+
+  /* ---------------- header ---------------- */
+  .head{ display:flex; align-items:center; gap:22px; }
+  .brand{ display:flex; flex-direction:column; line-height:1; min-width:150px;}
+  .brand .name{ font-size:21px; font-weight:600; letter-spacing:-.4px; color:var(--ink);}
+  .brand .name b{ color:var(--lilac-deep); font-weight:600;}
+  .brand .sub{ font-size:10.5px; color:var(--ink3); letter-spacing:1.2px; text-transform:uppercase; margin-top:5px;}
+
+  .grp{ display:flex; align-items:center; gap:9px;}
+  .lbl{ font-size:9px; letter-spacing:1.4px; color:var(--ink3); text-transform:uppercase; margin-right:2px;}
+
+  .seg{ display:flex; background:#fff; border:1px solid var(--line2); border-radius:10px; padding:3px; gap:2px;}
+  .seg button{ border:0; background:transparent; font:inherit; font-size:12.5px; color:var(--ink2);
+    width:30px; height:26px; border-radius:7px; cursor:pointer; font-weight:600;}
+  .seg button.on{ background:var(--lilac); color:var(--ink); box-shadow:0 2px 5px -1px rgba(194,164,214,.8);}
+
+  .sel{ display:flex; align-items:center; gap:7px; background:#fff; border:1px solid var(--line2);
+    border-radius:10px; height:32px; padding:0 11px; font-size:12.5px; color:var(--ink); font-weight:600;}
+  .sel .chev{ color:var(--ink3); font-size:9px;}
+
+  .seg.layer button{ width:auto; padding:0 12px;}
+  .seg.layer button.on{ background:var(--lilac); color:var(--ink); box-shadow:0 2px 5px -1px rgba(194,164,214,.8);}
+
+  .spacer{ flex:1; }
+  .iconbtn{ width:32px; height:32px; border-radius:9px; background:#fff; border:1px solid var(--line2);
+    color:var(--ink2); display:flex; align-items:center; justify-content:center; cursor:pointer; }
+  .iconbtn svg{ width:16px; height:16px; }
+
+  /* ---------------- body ---------------- */
+  .body{ flex:1; display:flex; gap:22px; min-height:0; }
+
+  /* flat offset second-colour (lilac) shadow on every panel */
+  .panel{ background:var(--card); border:1px solid var(--line);
+    box-shadow:8px 9px 0 0 var(--shadow); }
+
+  .timeline{ flex:1; border-radius:16px; padding:14px 16px 10px; display:flex; flex-direction:column; }
+  .tl-head{ display:flex; align-items:center; justify-content:space-between; margin-bottom:4px;}
+  .tl-head .t{ font-size:10px; letter-spacing:1.3px; text-transform:uppercase; color:var(--ink3);}
+  .tl-head .hint{ font-size:10.5px; color:var(--ink3);}
+  .tl-head .hint b{ color:var(--pink-deep); font-weight:600;}
+  svg.grid{ width:100%; flex:1; display:block; }
+
+  /* ---------------- right global panel ---------------- */
+  .global{ width:206px; border-radius:16px; padding:14px 16px; display:flex; flex-direction:column; gap:2px;}
+  .global .ttl{ font-size:10px; letter-spacing:1.3px; text-transform:uppercase; color:var(--ink3); margin-bottom:10px;}
+  .knobrow{ display:flex; justify-content:space-between; gap:6px; margin-bottom:6px;}
+  .knobwrap{ display:flex; flex-direction:column; align-items:center; gap:6px; flex:1;}
+  .knobwrap .kl{ font-size:10px; color:var(--ink2); font-weight:600;}
+  .knobwrap .kv{ font-size:10px; color:var(--ink3);}
+  .divider{ height:1px; background:var(--line2); margin:10px 0 12px;}
+  .toggles{ display:flex; flex-direction:column; gap:8px;}
+  .toggle{ display:flex; align-items:center; justify-content:space-between; font-size:12px; color:var(--ink); font-weight:500;}
+  .pill{ width:40px; height:23px; border-radius:13px; background:#e7e0ee; position:relative; transition:.2s;}
+  .pill::after{ content:""; position:absolute; width:18px; height:18px; border-radius:50%; background:#fff;
+    top:2.5px; left:2.5px; box-shadow:0 1px 3px rgba(90,70,120,.25);}
+  .pill.on{ background:var(--lilac);} .pill.on.pink{ background:var(--pink);}
+  .pill.on::after{ left:19px;}
+
+  /* knob component */
+  .knob{ position:relative; width:60px; height:60px;}
+  .knob .ring{ position:absolute; inset:0; border-radius:50%;
+    background:conic-gradient(from 225deg, var(--c) calc(var(--v)*270deg), #ece5ef calc(var(--v)*270deg) 270deg, transparent 270deg 360deg);
+    -webkit-mask:radial-gradient(transparent 60%, #000 62%); mask:radial-gradient(transparent 60%, #000 62%);}
+  .knob .cap{ position:absolute; inset:8px; border-radius:50%;
+    background:linear-gradient(160deg,#ffffff,#f5eef6); box-shadow:0 2px 6px rgba(90,70,120,.12), inset 0 1px 0 #fff;}
+  .knob .ptr{ position:absolute; left:50%; top:7px; width:3px; height:13px; margin-left:-1.5px;
+    background:var(--c); border-radius:2px; transform-origin:50% 23px;
+    transform:rotate(calc(225deg + var(--v)*270deg)); filter:brightness(.9);}
+
+  /* ---------------- inspector ---------------- */
+  .inspector{ height:92px; border-radius:16px; display:flex; align-items:center; padding:0 20px; gap:22px;}
+  .ins-id{ display:flex; flex-direction:column; gap:4px; min-width:96px;}
+  .ins-id .tag{ font-size:9px; letter-spacing:1.4px; text-transform:uppercase; color:var(--ink3);}
+  .ins-id .n{ font-size:17px; font-weight:600; color:var(--ink); display:flex; align-items:center; gap:8px;}
+  .ins-id .dot{ width:9px; height:9px; border-radius:50%; background:var(--lilac);}
+  .ins-id .pos{ font-size:10.5px; color:var(--ink2);}
+  .ins-sep{ width:1px; height:54px; background:var(--line2);}
+  .ins-knobs{ display:flex; gap:20px;}
+  .ins-btns{ display:flex; gap:8px; margin-left:auto; align-items:center;}
+  .tbtn{ font-size:11px; font-weight:600; color:var(--ink2); background:#fff; border:1px solid var(--line2);
+    border-radius:9px; height:34px; padding:0 14px; display:flex; align-items:center; cursor:pointer;}
+  .tbtn.on{ background:var(--lilac); color:var(--ink); border-color:transparent;}
+  .tbtn.on.blue{ background:var(--blue); color:var(--ink); border-color:transparent;}
+  .prob{ display:flex; flex-direction:column; align-items:center; gap:2px; margin-left:6px;}
+  .prob .v{ font-size:15px; font-weight:600; color:var(--ink);}
+  .prob .l{ font-size:9px; letter-spacing:1px; text-transform:uppercase; color:var(--ink3);}
+</style>
+</head>
+<body>
+  <div class="plugin">
+    <!-- header -->
+    <div class="head">
+      <div class="brand">
+        <div class="name">echo<b>grid</b></div>
+        <div class="sub">multi&#8209;tap delay</div>
+      </div>
+      <div class="grp">
+        <span class="lbl">Beats</span>
+        <div class="seg">
+          <button>1</button><button>2</button><button class="on">4</button><button>8</button>
+        </div>
+      </div>
+      <div class="grp">
+        <span class="lbl">Grid</span>
+        <div class="sel">1/16 <span class="chev">▾</span></div>
+      </div>
+      <div class="grp">
+        <span class="lbl">Layer</span>
+        <div class="seg layer">
+          <button class="on">Gain</button><button>Pan</button><button>Sat</button>
+        </div>
+      </div>
+      <div class="spacer"></div>
+      <div class="iconbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 5 5v1"/></svg></div>
+      <div class="iconbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9a5 5 0 0 0-5 5v1"/></svg></div>
+    </div>
+
+    <!-- body -->
+    <div class="body">
+      <div class="timeline panel">
+        <div class="tl-head">
+          <span class="t">Timeline · 4 beats</span>
+          <span class="hint" style="color:#b4afba">double&#8209;click to add a tap · drag for level · <b style="color:#a981c6">Gain</b> layer</span>
+        </div>
+        <svg class="grid" viewBox="0 0 820 300" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="area" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#c2a4d6" stop-opacity=".38"/>
+              <stop offset="1" stop-color="#c2a4d6" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <!-- subdivision lines -->
+          <g stroke="#f4eff7" stroke-width="1">
+            <line x1="85" y1="40" x2="85" y2="262"/><line x1="130" y1="40" x2="130" y2="262"/><line x1="175" y1="40" x2="175" y2="262"/>
+            <line x1="265" y1="40" x2="265" y2="262"/><line x1="310" y1="40" x2="310" y2="262"/><line x1="355" y1="40" x2="355" y2="262"/>
+            <line x1="445" y1="40" x2="445" y2="262"/><line x1="490" y1="40" x2="490" y2="262"/><line x1="535" y1="40" x2="535" y2="262"/>
+            <line x1="625" y1="40" x2="625" y2="262"/><line x1="670" y1="40" x2="670" y2="262"/><line x1="715" y1="40" x2="715" y2="262"/>
+          </g>
+          <!-- beat lines -->
+          <g stroke="#e9e1f0" stroke-width="1.4">
+            <line x1="40" y1="36" x2="40" y2="266"/><line x1="220" y1="36" x2="220" y2="266"/>
+            <line x1="400" y1="36" x2="400" y2="266"/><line x1="580" y1="36" x2="580" y2="266"/><line x1="760" y1="36" x2="760" y2="266"/>
+          </g>
+          <!-- baseline -->
+          <line x1="40" y1="262" x2="760" y2="262" stroke="#ddd3e7" stroke-width="1.5"/>
+          <!-- beat numbers -->
+          <g fill="#bcb3c6" font-size="10" font-family="-apple-system,sans-serif">
+            <text x="44" y="282">1</text><text x="224" y="282">2</text><text x="404" y="282">3</text><text x="584" y="282">4</text>
+          </g>
+          <!-- automation area + curve through tap tops -->
+          <path d="M40,45 L175,104 L265,139 L400,79 L490,171 L580,129 L670,186 L715,209 L715,262 L40,262 Z" fill="url(#area)"/>
+          <polyline points="40,45 175,104 265,139 400,79 490,171 580,129 670,186 715,209"
+            fill="none" stroke="#a981c6" stroke-width="1.6" stroke-dasharray="2 4" stroke-linecap="round"/>
+          <!-- stems -->
+          <g stroke="#dcccea" stroke-width="2.4" stroke-linecap="round">
+            <line x1="40" y1="262" x2="40" y2="45"/><line x1="175" y1="262" x2="175" y2="104"/>
+            <line x1="265" y1="262" x2="265" y2="139"/><line x1="490" y1="262" x2="490" y2="171"/>
+            <line x1="580" y1="262" x2="580" y2="129"/><line x1="670" y1="262" x2="670" y2="186"/>
+            <line x1="715" y1="262" x2="715" y2="209"/>
+          </g>
+          <!-- selected stem -->
+          <line x1="400" y1="262" x2="400" y2="79" stroke="#a981c6" stroke-width="2.6" stroke-linecap="round"/>
+          <!-- taps -->
+          <g>
+            <circle cx="40"  cy="45"  r="8" fill="#a981c6"/>
+            <circle cx="175" cy="104" r="8" fill="#c2a4d6"/>
+            <circle cx="265" cy="139" r="8" fill="#c2a4d6"/>
+            <circle cx="490" cy="171" r="8" fill="#c2a4d6"/>
+            <circle cx="580" cy="129" r="8" fill="#c2a4d6"/>
+            <circle cx="670" cy="186" r="8" fill="#c2a4d6"/>
+            <circle cx="715" cy="209" r="8" fill="#c2a4d6"/>
+          </g>
+          <!-- dry/downbeat label -->
+          <text x="28" y="32" fill="#b0a6bb" font-size="9.5" font-family="-apple-system,sans-serif">DRY</text>
+          <!-- selected tap: anthracite ring -->
+          <circle cx="400" cy="79" r="13" fill="#fff" stroke="#33333a" stroke-width="2.4"/>
+          <circle cx="400" cy="79" r="6" fill="#c2a4d6"/>
+          <g transform="translate(400,79)">
+            <rect x="14" y="-30" width="62" height="22" rx="6" fill="#33333a"/>
+            <text x="45" y="-15" fill="#fff" font-size="11" font-family="-apple-system,sans-serif" text-anchor="middle">Tap 4 · 84%</text>
+          </g>
+        </svg>
+      </div>
+
+      <div class="global panel">
+        <div class="ttl">Global</div>
+        <div class="knobrow">
+          <div class="knobwrap">
+            <div class="knob" style="--v:.28;--c:#a2d2ff"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div>
+            <div class="kl">HP</div><div class="kv">120 Hz</div>
+          </div>
+          <div class="knobwrap">
+            <div class="knob" style="--v:.74;--c:#a2d2ff"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div>
+            <div class="kl">LP</div><div class="kv">8.4 kHz</div>
+          </div>
+        </div>
+        <div class="knobrow" style="justify-content:center">
+          <div class="knobwrap" style="flex:0 0 auto">
+            <div class="knob" style="--v:.46;--c:#ffafcc;width:66px;height:66px"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div>
+            <div class="kl">Drive</div><div class="kv">tape · 46%</div>
+          </div>
+        </div>
+        <div class="divider"></div>
+        <div class="toggles">
+          <div class="toggle"><span>Filter dry</span><div class="pill"></div></div>
+          <div class="toggle"><span>Global tape</span><div class="pill on pink"></div></div>
+          <div class="toggle"><span>Analog jitter</span><div class="pill"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- inspector -->
+    <div class="inspector panel">
+      <div class="ins-id">
+        <span class="tag">Selected tap</span>
+        <span class="n"><span class="dot"></span>Tap 4</span>
+        <span class="pos">beat 3 · 84%</span>
+      </div>
+      <div class="ins-sep"></div>
+      <div class="ins-knobs">
+        <div class="knobwrap" style="flex:0 0 auto">
+          <div class="knob" style="--v:.84;--c:#c2a4d6;width:50px;height:50px"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div>
+          <div class="kl">Level</div>
+        </div>
+        <div class="knobwrap" style="flex:0 0 auto">
+          <div class="knob" style="--v:.62;--c:#a2d2ff;width:50px;height:50px"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div>
+          <div class="kl">Pan</div>
+        </div>
+        <div class="knobwrap" style="flex:0 0 auto">
+          <div class="knob" style="--v:.40;--c:#ffafcc;width:50px;height:50px"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div>
+          <div class="kl">Rev Len</div>
+        </div>
+      </div>
+      <div class="ins-btns">
+        <div class="tbtn">In Time</div>
+        <div class="tbtn on blue">Reverse</div>
+        <div class="tbtn on">On</div>
+        <div class="prob"><span class="v">84%</span><span class="l">Prob</span></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
