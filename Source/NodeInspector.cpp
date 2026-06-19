@@ -1,22 +1,20 @@
 #include "NodeInspector.h"
 #include "NodeTimeline.h"
+#include "Theme.h"
 
 //==============================================================================
 // Helpers
 //==============================================================================
 static void styleKnob(juce::Slider& s)
 {
-    s.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour(0xff334488));
-    s.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xff1a1a30));
-    s.setColour(juce::Slider::thumbColourId,               juce::Colour(0xff8899ff));
+    s.setColour(juce::Slider::rotarySliderFillColourId, eg::col::lilac);  // overridden per knob
 }
 
 static void styleButton(juce::TextButton& b)
 {
-    b.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xff1a1a2e));
-    b.setColour(juce::TextButton::buttonOnColourId,juce::Colour(0xff444488));
-    b.setColour(juce::TextButton::textColourOffId, juce::Colour(0xff5566aa));
-    b.setColour(juce::TextButton::textColourOnId,  juce::Colour(0xffe0e0ff));
+    b.setColour(juce::TextButton::buttonOnColourId, eg::col::lilac);
+    b.setColour(juce::TextButton::textColourOffId,  eg::col::ink2);
+    b.setColour(juce::TextButton::textColourOnId,   eg::col::ink);
 }
 
 //--- IN TIME / FREE reverse-timing toggle: DISABLED in the UI for now (it added no
@@ -31,8 +29,8 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
     : processor(p), timeline(t)
 {
     //--- node label ---
-    nodeLabel.setFont(juce::Font(10.0f));
-    nodeLabel.setColour(juce::Label::textColourId, juce::Colour(0xff5566aa));
+    nodeLabel.setFont(juce::Font(11.0f, juce::Font::bold));
+    nodeLabel.setColour(juce::Label::textColourId, eg::col::ink);
     nodeLabel.setJustificationType(juce::Justification::centredLeft);
     addAndMakeVisible(nodeLabel);
 
@@ -83,6 +81,7 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
     panSlider.setRange(-1.0, 1.0, 0.01);
     panSlider.setDoubleClickReturnValue(true, 0.0);
     styleKnob(panSlider);
+    panSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::blue);
     panSlider.onDragStart = [this]
     {
         panDragging    = true;
@@ -125,6 +124,7 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
     revLenSlider.setRange(0.0, 1.0, 0.01);
     revLenSlider.setDoubleClickReturnValue(true, 1.0);
     styleKnob(revLenSlider);
+    revLenSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::pink);
     revLenSlider.onDragStart = [this]
     {
         revLenDragging   = true;
@@ -180,8 +180,9 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
     };
     if (kShowReverseTimingToggle) addAndMakeVisible(revLockBtn);
 
-    //--- reverse button ---
+    //--- reverse button (blue) ---
     styleButton(reverseBtn);
+    reverseBtn.setColour(juce::TextButton::buttonOnColourId, eg::col::blue);
     reverseBtn.setClickingTogglesState(true);
     reverseBtn.onClick = [this]
     {
@@ -200,10 +201,8 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
     };
     addAndMakeVisible(reverseBtn);
 
-    //--- active button: applies to all selected nodes, supports undo ---
+    //--- active button (lilac): applies to all selected nodes, supports undo ---
     styleButton(activeBtn);
-    activeBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff1a3322));
-    activeBtn.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xff88ee88));
     activeBtn.setClickingTogglesState(true);
     activeBtn.onClick = [this]
     {
@@ -225,8 +224,9 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
 
     //--- probability display (read-only; value set by scroll wheel on timeline) ---
     probDisplay.setJustificationType(juce::Justification::centred);
-    probDisplay.setColour(juce::Label::backgroundColourId, juce::Colour(0xff1e1e34));
-    probDisplay.setColour(juce::Label::textColourId,       juce::Colour(0xff8899cc));
+    probDisplay.setFont(juce::Font(13.0f, juce::Font::bold));
+    probDisplay.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+    probDisplay.setColour(juce::Label::textColourId,       eg::col::ink);
     addAndMakeVisible(probDisplay);
 
     startTimerHz(30);
@@ -266,27 +266,28 @@ void NodeInspector::resized()
 //==============================================================================
 void NodeInspector::paint(juce::Graphics& g)
 {
-    //--- panel background (slightly lighter than editor to show as a distinct area) ---
-    g.fillAll(juce::Colour(0xff12121f));
-
-    //--- top divider line ---
-    g.setColour(juce::Colour(0xff4a4a7a));
-    g.fillRect(0, 0, getWidth(), 1);
+    //--- rounded panel background (corners unpainted so the editor's offset
+    //    shadow and window background show through) ---
+    auto panelR = getLocalBounds().toFloat().reduced(0.5f);
+    g.setColour(eg::col::surface);
+    g.fillRoundedRectangle(panelR, 16.0f);
+    g.setColour(eg::col::line);
+    g.drawRoundedRectangle(panelR, 16.0f, 1.0f);
 
     int idx = timeline.getSelectedIndex();
 
     if (idx == -1)
     {
-        g.setColour(juce::Colour(0xff3a3a5a));
+        g.setColour(eg::col::ink3);
         g.setFont(11.0f);
-        g.drawText("— click a node to inspect —",
+        g.drawText("Click a node to inspect",
                    getLocalBounds(), juce::Justification::centred);
         return;
     }
 
     //--- section labels above each control ---
-    g.setColour(juce::Colour(0xff5566aa));
-    g.setFont(10.0f);
+    g.setColour(eg::col::ink3);
+    g.setFont(9.0f);
 
     auto labelAbove = [&](juce::Rectangle<int> r, const juce::String& text)
     {
@@ -304,7 +305,7 @@ void NodeInspector::paint(juce::Graphics& g)
     if (idx >= 0) labelAbove(probDisplay.getBounds(), "PROB");
 
     //--- value readouts below each knob ---
-    g.setColour(juce::Colour(0xff8899cc));
+    g.setColour(eg::col::ink2);
     g.setFont(9.0f);
 
     auto valueBelow = [&](juce::Rectangle<int> r, const juce::String& text)

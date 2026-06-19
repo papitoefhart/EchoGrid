@@ -1,6 +1,6 @@
 #include "PluginEditor.h"
 
-static constexpr int kBuildVersion = 22;
+static const juce::String kVersionLabel = "0.30";
 
 //==============================================================================
 // Musical subdivision options — label shown in ComboBox, beats = snap step in beats
@@ -23,38 +23,181 @@ static const SubdivOption kSubdivs[] = {
 static constexpr int kNumSubdivs = 12;
 
 //==============================================================================
-// UndoArrowButton — vector-drawn curved arrow, no font glyph required
+// EchoGridLAF — light "modern/calm" look
+//==============================================================================
+EchoGridLAF::EchoGridLAF()
+{
+    setColour(juce::PopupMenu::backgroundColourId,            eg::col::panel);
+    setColour(juce::PopupMenu::textColourId,                 eg::col::ink);
+    setColour(juce::PopupMenu::highlightedBackgroundColourId, eg::col::lilacSoft);
+    setColour(juce::PopupMenu::highlightedTextColourId,      eg::col::ink);
+}
+
+void EchoGridLAF::drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h,
+                                   float sliderPos, float startAngle, float endAngle,
+                                   juce::Slider& slider)
+{
+    auto bounds = juce::Rectangle<int>(x, y, w, h).toFloat().reduced(3.0f);
+    const float cx = bounds.getCentreX();
+    const float cy = bounds.getCentreY();
+    const float radius  = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.5f;
+    const float toAngle = startAngle + sliderPos * (endAngle - startAngle);
+
+    juce::Colour fill = slider.isEnabled()
+                      ? slider.findColour(juce::Slider::rotarySliderFillColourId)
+                      : eg::col::line2;
+
+    const float lineW   = juce::jmin(6.0f, radius * 0.30f);
+    const float arcR    = radius - lineW * 0.5f;
+
+    //--- track arc ---
+    juce::Path track;
+    track.addCentredArc(cx, cy, arcR, arcR, 0.0f, startAngle, endAngle, true);
+    g.setColour(eg::col::line2);
+    g.strokePath(track, juce::PathStrokeType(lineW, juce::PathStrokeType::curved,
+                                             juce::PathStrokeType::rounded));
+
+    //--- value arc ---
+    if (sliderPos > 0.001f)
+    {
+        juce::Path val;
+        val.addCentredArc(cx, cy, arcR, arcR, 0.0f, startAngle, toAngle, true);
+        g.setColour(fill);
+        g.strokePath(val, juce::PathStrokeType(lineW, juce::PathStrokeType::curved,
+                                               juce::PathStrokeType::rounded));
+    }
+
+    //--- soft cap ---
+    const float capR = arcR - lineW - 2.0f;
+    juce::Rectangle<float> cap(cx - capR, cy - capR, capR * 2.0f, capR * 2.0f);
+    g.setGradientFill(juce::ColourGradient(juce::Colours::white, cx, cy - capR,
+                                           juce::Colour(0xfff3eef6), cx, cy + capR, false));
+    g.fillEllipse(cap);
+    g.setColour(eg::col::line2);
+    g.drawEllipse(cap, 1.0f);
+
+    //--- pointer ---
+    juce::Path ptr;
+    const float ptrLen = capR * 0.82f;
+    ptr.addRoundedRectangle(-1.4f, -ptrLen, 2.8f, ptrLen * 0.55f, 1.4f);
+    g.setColour(slider.isEnabled() ? fill : eg::col::ink3);
+    g.fillPath(ptr, juce::AffineTransform::rotation(toAngle).translated(cx, cy));
+}
+
+void EchoGridLAF::drawComboBox(juce::Graphics& g, int w, int h, bool /*isDown*/,
+                               int, int, int, int, juce::ComboBox& box)
+{
+    auto r = juce::Rectangle<float>(0.0f, 0.0f, (float)w, (float)h).reduced(0.5f);
+    g.setColour(eg::col::panel);
+    g.fillRoundedRectangle(r, 9.0f);
+    g.setColour(box.hasKeyboardFocus(true) ? eg::col::lilac : eg::col::line2);
+    g.drawRoundedRectangle(r, 9.0f, 1.0f);
+
+    //--- chevron ---
+    const float chX = w - 15.0f, chY = h * 0.5f;
+    juce::Path chev;
+    chev.startNewSubPath(chX - 3.5f, chY - 2.0f);
+    chev.lineTo(chX,        chY + 2.5f);
+    chev.lineTo(chX + 3.5f, chY - 2.0f);
+    g.setColour(eg::col::ink3);
+    g.strokePath(chev, juce::PathStrokeType(1.5f, juce::PathStrokeType::curved,
+                                            juce::PathStrokeType::rounded));
+}
+
+juce::Font EchoGridLAF::getComboBoxFont(juce::ComboBox&) { return juce::Font(12.5f); }
+
+void EchoGridLAF::positionComboBoxText(juce::ComboBox& box, juce::Label& label)
+{
+    label.setBounds(11, 1, box.getWidth() - 28, box.getHeight() - 2);
+    label.setFont(getComboBoxFont(box));
+    label.setColour(juce::Label::textColourId, eg::col::ink);
+    label.setJustificationType(juce::Justification::centredLeft);
+}
+
+void EchoGridLAF::drawPopupMenuBackground(juce::Graphics& g, int w, int h)
+{
+    g.fillAll(eg::col::panel);
+    g.setColour(eg::col::line2);
+    g.drawRect(0, 0, w, h, 1);
+}
+
+void EchoGridLAF::drawButtonBackground(juce::Graphics& g, juce::Button& b,
+                                       const juce::Colour&, bool over, bool /*down*/)
+{
+    auto r = b.getLocalBounds().toFloat().reduced(0.5f);
+    const float radius = juce::jmin(9.0f, r.getHeight() * 0.5f);
+
+    if (b.getToggleState())
+    {
+        g.setColour(b.findColour(juce::TextButton::buttonOnColourId));
+        g.fillRoundedRectangle(r, radius);
+    }
+    else
+    {
+        g.setColour(over ? eg::col::lilacSoft.withAlpha(0.35f) : eg::col::panel);
+        g.fillRoundedRectangle(r, radius);
+        g.setColour(eg::col::line2);
+        g.drawRoundedRectangle(r, radius, 1.0f);
+    }
+}
+
+void EchoGridLAF::drawButtonText(juce::Graphics& g, juce::TextButton& b, bool, bool)
+{
+    g.setColour(b.getToggleState() ? b.findColour(juce::TextButton::textColourOnId)
+                                   : b.findColour(juce::TextButton::textColourOffId));
+    g.setFont(juce::Font(12.0f));
+    g.drawText(b.getButtonText(), b.getLocalBounds(), juce::Justification::centred, false);
+}
+
+//==============================================================================
+// PillSwitch — sliding pastel toggle
+//==============================================================================
+void PillSwitch::paintButton(juce::Graphics& g, bool /*over*/, bool /*down*/)
+{
+    auto r = getLocalBounds().toFloat();
+    const float h  = r.getHeight();
+    const bool  on = getToggleState();
+
+    g.setColour(on ? onColour : eg::col::line2);
+    g.fillRoundedRectangle(r, h * 0.5f);
+
+    const float kr = h - 5.0f;
+    const float kx = on ? r.getRight() - kr - 2.5f : r.getX() + 2.5f;
+    g.setColour(juce::Colours::white);
+    g.fillEllipse(kx, r.getY() + 2.5f, kr, kr);
+    g.setColour(juce::Colour(0x22000000));
+    g.drawEllipse(kx, r.getY() + 2.5f, kr, kr, 0.8f);
+}
+
+//==============================================================================
+// UndoArrowButton — vector-drawn curved arrow, light style
 //==============================================================================
 void UndoArrowButton::paintButton(juce::Graphics& g, bool mouseOver, bool isDown)
 {
-    const auto b = getLocalBounds().toFloat().reduced(1.0f);
+    const auto b = getLocalBounds().toFloat().reduced(0.5f);
 
-    //--- background matches the grid button colour scheme ---
-    g.setColour(isDown    ? juce::Colour(0xff2a2a50) :
-                mouseOver ? juce::Colour(0xff1e1e3a) :
-                            juce::Colour(0xff1a1a2e));
-    g.fillRoundedRectangle(b, 4.0f);
+    g.setColour(isDown    ? eg::col::lilacSoft :
+                mouseOver ? eg::col::line :
+                            eg::col::panel);
+    g.fillRoundedRectangle(b, 8.0f);
+    g.setColour(eg::col::line2);
+    g.drawRoundedRectangle(b, 8.0f, 1.0f);
 
-    g.setColour(juce::Colour(0xff5566aa));
+    g.setColour(eg::col::ink2);
 
     const float cx = b.getCentreX();
     const float cy = b.getCentreY() + 0.5f;
-    const float rx = b.getWidth()  * 0.28f;   // arc half-width
-    const float ry = b.getHeight() * 0.26f;   // arc half-height
-    const float ah = 3.0f;                     // arrowhead size
+    const float rx = b.getWidth()  * 0.24f;
+    const float ry = b.getHeight() * 0.22f;
+    const float ah = 3.0f;
 
-    //--- curved arc: Bezier approximation of an open semicircle ---
     juce::Path arc;
     if (!isRedo)
     {
-        //--- undo ↺: start bottom-right, sweep up and over to bottom-left ---
         arc.startNewSubPath(cx + rx, cy + ry * 0.5f);
-        arc.cubicTo(cx + rx, cy - ry * 1.1f,
-                    cx - rx, cy - ry * 1.1f,
-                    cx - rx, cy + ry * 0.5f);
+        arc.cubicTo(cx + rx, cy - ry * 1.1f, cx - rx, cy - ry * 1.1f, cx - rx, cy + ry * 0.5f);
         g.strokePath(arc, juce::PathStrokeType(1.7f, juce::PathStrokeType::curved,
                                                juce::PathStrokeType::rounded));
-        //--- arrowhead at the arc's end (bottom-left), pointing downward ---
         juce::Path head;
         head.addTriangle(cx - rx - ah, cy + ry * 0.5f - ah * 0.4f,
                          cx - rx + ah, cy + ry * 0.5f - ah * 0.4f,
@@ -63,14 +206,10 @@ void UndoArrowButton::paintButton(juce::Graphics& g, bool mouseOver, bool isDown
     }
     else
     {
-        //--- redo ↻: mirror — start bottom-left, sweep up and over to bottom-right ---
         arc.startNewSubPath(cx - rx, cy + ry * 0.5f);
-        arc.cubicTo(cx - rx, cy - ry * 1.1f,
-                    cx + rx, cy - ry * 1.1f,
-                    cx + rx, cy + ry * 0.5f);
+        arc.cubicTo(cx - rx, cy - ry * 1.1f, cx + rx, cy - ry * 1.1f, cx + rx, cy + ry * 0.5f);
         g.strokePath(arc, juce::PathStrokeType(1.7f, juce::PathStrokeType::curved,
                                                juce::PathStrokeType::rounded));
-        //--- arrowhead at the arc's end (bottom-right), pointing downward ---
         juce::Path head;
         head.addTriangle(cx + rx - ah, cy + ry * 0.5f - ah * 0.4f,
                          cx + rx + ah, cy + ry * 0.5f - ah * 0.4f,
@@ -82,25 +221,26 @@ void UndoArrowButton::paintButton(juce::Graphics& g, bool mouseOver, bool isDown
 //==============================================================================
 // Helpers
 //==============================================================================
-static void styleGridBtn(juce::TextButton& b)
+static void styleBeatBtn(juce::TextButton& b)
 {
-    b.setColour(juce::TextButton::buttonColourId,  juce::Colour(0xff1a1a2e));
-    b.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff3a3a6a));
-    b.setColour(juce::TextButton::textColourOffId, juce::Colour(0xff5566aa));
-    b.setColour(juce::TextButton::textColourOnId,  juce::Colour(0xffe0e0ff));
+    b.setColour(juce::TextButton::buttonOnColourId, eg::col::lilac);
+    b.setColour(juce::TextButton::textColourOnId,   eg::col::ink);
+    b.setColour(juce::TextButton::textColourOffId,  eg::col::ink2);
 }
 
 //==============================================================================
 EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
     : AudioProcessorEditor(&p), processorRef(p), timeline(p, undoManager), inspector(p, timeline)
 {
+    setLookAndFeel(&egLAF);
+
     //--- beat length buttons ---
     const juce::String beatLabels[4] = { "1", "2", "4", "8" };
     for (int i = 0; i < 4; ++i)
     {
         beatBtns[i].setButtonText(beatLabels[i]);
         beatBtns[i].setClickingTogglesState(false);
-        styleGridBtn(beatBtns[i]);
+        styleBeatBtn(beatBtns[i]);
         beatBtns[i].onClick = [this, i]
         {
             int newLen = beatOptions[i];
@@ -119,10 +259,7 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
         addAndMakeVisible(beatBtns[i]);
     }
 
-    //--- subdivision ComboBox: each entry is a musical subdivision value.
-    //    The beat value is the snap step in beats (e.g. 0.25 = 1/16 note).
-    //    T-suffix entries are triplets. ---
-    subdivBox.setLookAndFeel(&darkComboLAF);
+    //--- subdivision ComboBox ---
     for (int i = 0; i < kNumSubdivs; ++i)
         subdivBox.addItem(kSubdivs[i].label, i + 1);
     subdivBox.setSelectedId(5, juce::dontSendNotification);  // 1/16 default
@@ -139,25 +276,7 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
     };
     addAndMakeVisible(subdivBox);
 
-    //--- analog timing jitter knob (disabled) ---
-    //    this control is preserved in the UI but disabled while reverse
-    //    latency behavior is being stabilized.
-    analogSlider.setRange(0.0, 1.0, 0.01);
-    analogSlider.setDoubleClickReturnValue(true, 0.0);
-    analogSlider.setValue(p.analogAmount, juce::dontSendNotification);
-    analogSlider.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour(0xff6633aa));
-    analogSlider.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xff222238));
-    analogSlider.setColour(juce::Slider::thumbColourId,               juce::Colour(0xffbb88ff));
-    analogSlider.setEnabled(false);
-    analogSlider.setTooltip("Disabled until reverse timing is stabilized");
-    analogSlider.onValueChange = [this]
-    {
-        processorRef.analogAmount = (float)analogSlider.getValue();
-    };
-    addAndMakeVisible(analogSlider);
-
-    //--- layer selector: picks which automation overlay is shown ---
-    layerBox.setLookAndFeel(&darkComboLAF);
+    //--- layer selector ---
     layerBox.addItem("GAIN", 1);
     layerBox.addItem("PAN", 2);
     layerBox.addItem("SAT", 3);
@@ -170,47 +289,83 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
     };
     addAndMakeVisible(layerBox);
 
-    //--- undo / redo buttons (paint themselves as vector arrows) ---
+    //--- undo / redo ---
     undoBtn.onClick = [this] { undoManager.undo(); timeline.repaint(); };
     addAndMakeVisible(undoBtn);
-
     redoBtn.onClick = [this] { undoManager.redo(); timeline.repaint(); };
     addAndMakeVisible(redoBtn);
 
-    //--- HP filter knob ---
+    //--- HP / LP filter knobs (blue) ---
     hpSlider.setNormalisableRange(juce::NormalisableRange<double>(20.0, 8000.0, 1.0, 0.35));
     hpSlider.setValue(p.hpCutoffHz, juce::dontSendNotification);
     hpSlider.setDoubleClickReturnValue(true, 20.0);
-    hpSlider.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour(0xff334488));
-    hpSlider.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xff222238));
-    hpSlider.setColour(juce::Slider::thumbColourId,               juce::Colour(0xff8899ff));
+    hpSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::blue);
     hpSlider.onValueChange = [this] { processorRef.hpCutoffHz = (float)hpSlider.getValue(); };
     addAndMakeVisible(hpSlider);
 
-    //--- LP filter knob ---
     lpSlider.setNormalisableRange(juce::NormalisableRange<double>(200.0, 20000.0, 1.0, 0.35));
     lpSlider.setValue(p.lpCutoffHz, juce::dontSendNotification);
     lpSlider.setDoubleClickReturnValue(true, 20000.0);
-    lpSlider.setColour(juce::Slider::rotarySliderFillColourId,    juce::Colour(0xff334488));
-    lpSlider.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xff222238));
-    lpSlider.setColour(juce::Slider::thumbColourId,               juce::Colour(0xff8899ff));
+    lpSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::blue);
     lpSlider.onValueChange = [this] { processorRef.lpCutoffHz = (float)lpSlider.getValue(); };
     addAndMakeVisible(lpSlider);
 
-    //--- filter-dry toggle ---
-    styleGridBtn(filterDryBtn);
-    filterDryBtn.setClickingTogglesState(true);
-    filterDryBtn.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff223366));
-    filterDryBtn.setColour(juce::TextButton::textColourOnId,   juce::Colour(0xffaabbff));
+    //--- filter-dry toggle (blue, filter section) ---
+    filterDryBtn.setOnColour(eg::col::blue);
     filterDryBtn.onClick = [this] { processorRef.filterDry = filterDryBtn.getToggleState(); };
     addAndMakeVisible(filterDryBtn);
 
+    //--- global tape DRIVE knob (pink) ---
+    driveSlider.setRange(0.0, 1.0, 0.01);
+    driveSlider.setValue(p.satDrive, juce::dontSendNotification);
+    driveSlider.setDoubleClickReturnValue(true, 0.0);
+    driveSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::pink);
+    driveSlider.setTooltip("Tape drive on the whole output (dry + echoes). Active only when GLOBAL tape is on; otherwise use each tap's SAT slider.");
+    driveSlider.onValueChange = [this] { processorRef.satDrive = (float)driveSlider.getValue(); };
+    addAndMakeVisible(driveSlider);
+
+    //--- GLOBAL tape toggle (pink) ---
+    satGlobalBtn.setOnColour(eg::col::pink);
+    satGlobalBtn.setTooltip("Ignore each tap's own drive; drive everything with the DRIVE knob");
+    satGlobalBtn.onClick = [this] { processorRef.satGlobalOverride = satGlobalBtn.getToggleState(); };
+    addAndMakeVisible(satGlobalBtn);
+
+    //--- global INPUT / OUTPUT trim knobs (lilac = level).  Knob is in dB (±24,
+    //    0 = unity); the processor stores the linear gain. ---
+    auto setupGainKnob = [this](juce::Slider& s, float linearGain,
+                                std::function<void(float)> setter, const juce::String& tip)
+    {
+        s.setNormalisableRange(juce::NormalisableRange<double>(-24.0, 24.0, 0.1));
+        s.setValue(juce::Decibels::gainToDecibels(linearGain, -60.0f), juce::dontSendNotification);
+        s.setDoubleClickReturnValue(true, 0.0);
+        s.setColour(juce::Slider::rotarySliderFillColourId, eg::col::lilac);
+        s.setTextValueSuffix(" dB");
+        s.setTooltip(tip);
+        s.onValueChange = [&s, setter] { setter(juce::Decibels::decibelsToGain((float)s.getValue())); };
+        addAndMakeVisible(s);
+    };
+    setupGainKnob(inputSlider,  p.inputGain,
+                  [this](float g){ processorRef.inputGain  = g; },
+                  "Input gain into the whole effect (also sets how hard saturation is driven)");
+    setupGainKnob(outputSlider, p.outputGain,
+                  [this](float g){ processorRef.outputGain = g; },
+                  "Output gain — final level after the whole chain");
+
+    //--- analog timing jitter knob (disabled, future) ---
+    analogSlider.setRange(0.0, 1.0, 0.01);
+    analogSlider.setDoubleClickReturnValue(true, 0.0);
+    analogSlider.setValue(p.analogAmount, juce::dontSendNotification);
+    analogSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::lilac);
+    analogSlider.setEnabled(false);
+    analogSlider.setTooltip("Disabled until reverse timing is stabilized");
+    analogSlider.onValueChange = [this] { processorRef.analogAmount = (float)analogSlider.getValue(); };
+    addAndMakeVisible(analogSlider);
 
     addAndMakeVisible(timeline);
     addAndMakeVisible(inspector);
     setResizable(true, true);
-    setResizeLimits(760, 340, 1600, 900);
-    setSize(960, 420);
+    setResizeLimits(860, 560, 1600, 900);   // min height fits the IN/OUT row in the global panel
+    setSize(1040, 600);
     startTimerHz(10);
     updateGridButtons();
 }
@@ -218,12 +373,12 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
 EchoGridEditor::~EchoGridEditor()
 {
     stopTimer();
+    setLookAndFeel(nullptr);
 }
 
 //==============================================================================
 void EchoGridEditor::timerCallback()
 {
-    //--- sync sliders if state was loaded externally (preset, DAW recall) ---
     auto syncf = [](juce::Slider& s, float v) {
         if (std::abs((float)s.getValue() - v) > 0.001f)
             s.setValue(v, juce::dontSendNotification);
@@ -231,99 +386,171 @@ void EchoGridEditor::timerCallback()
     syncf(analogSlider, processorRef.analogAmount);
     syncf(hpSlider,     processorRef.hpCutoffHz);
     syncf(lpSlider,     processorRef.lpCutoffHz);
-    filterDryBtn.setToggleState(processorRef.filterDry, juce::dontSendNotification);
+    syncf(driveSlider,  processorRef.satDrive);
+    //--- gain knobs are in dB but the processor holds linear gain ---
+    auto syncGain = [](juce::Slider& s, float linear) {
+        float dB = juce::Decibels::gainToDecibels(linear, -60.0f);
+        if (std::abs((float)s.getValue() - dB) > 0.01f)
+            s.setValue(dB, juce::dontSendNotification);
+    };
+    syncGain(inputSlider,  processorRef.inputGain);
+    syncGain(outputSlider, processorRef.outputGain);
+    filterDryBtn.setToggleState(processorRef.filterDry,          juce::dontSendNotification);
+    satGlobalBtn.setToggleState(processorRef.satGlobalOverride,  juce::dontSendNotification);
 
     updateGridButtons();
 }
 
 void EchoGridEditor::updateGridButtons()
 {
-    //--- beat length buttons ---
     int curLen = (int)processorRef.gridLengthBeats;
     for (int i = 0; i < 4; ++i)
-    {
-        bool on = (beatOptions[i] == curLen);
-        beatBtns[i].setColour(juce::TextButton::textColourOffId,
-                              on ? juce::Colour(0xffe0e0ff) : juce::Colour(0xff5566aa));
-        beatBtns[i].setColour(juce::TextButton::buttonColourId,
-                              on ? juce::Colour(0xff2a2a50) : juce::Colour(0xff1a1a2e));
-    }
+        beatBtns[i].setToggleState(beatOptions[i] == curLen, juce::dontSendNotification);
 
-    //--- subdivision ComboBox: select the entry matching the current snap step ---
     float cur = processorRef.snapStepBeats;
     for (int i = 0; i < kNumSubdivs; ++i)
-    {
         if (std::abs(kSubdivs[i].beats - cur) < 0.0001f)
         {
             subdivBox.setSelectedId(i + 1, juce::dontSendNotification);
             break;
         }
-    }
+    repaint();
 }
 
 //==============================================================================
 void EchoGridEditor::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xff0d0d1a));
+    g.fillAll(eg::col::windowBg);
 
-    g.setColour(juce::Colour(0xff5555aa));
-    g.setFont(13.0f);
-    g.drawText("ECHO GRID", 16, 0, 90, 60, juce::Justification::centredLeft, false);
+    //--- brand ---
+    juce::Font bf(20.0f, juce::Font::bold);
+    g.setFont(bf);
+    const float bx = 18.0f, byTop = 16.0f;
+    g.setColour(eg::col::ink);
+    g.drawText("echo", (int)bx, (int)byTop, 80, 24, juce::Justification::left, false);
+    const float ew = bf.getStringWidthFloat("echo");
+    g.setColour(eg::col::lilacDeep);
+    g.drawText("grid", (int)(bx + ew), (int)byTop, 80, 24, juce::Justification::left, false);
 
-    g.setColour(juce::Colours::white);
-    g.setFont(8.0f);
-    g.drawText("v" + juce::String(kBuildVersion), 16, 44, 40, 12,
-               juce::Justification::centredLeft, false);
+    g.setColour(eg::col::ink3);
+    g.setFont(8.5f);
+    g.drawText("MULTI-TAP DELAY", (int)bx, 41, 130, 10, juce::Justification::left, false);
+    g.drawText("v" + kVersionLabel, (int)bx, 2, 60, 10, juce::Justification::left, false);
 
-    //--- section labels for grid controls ---
+    //--- top-bar section labels ---
+    g.setColour(eg::col::ink3);
+    g.setFont(8.5f);
+    auto sectionLabel = [&](juce::Component& c, const juce::String& t) {
+        g.drawText(t, c.getX(), c.getY() - 13, 80, 10, juce::Justification::left, false);
+    };
+    sectionLabel(beatBtns[0], "BEATS");
+    sectionLabel(subdivBox,   "GRID");
+    sectionLabel(layerBox,    "LAYER");
+
+    //--- offset second-colour shadow behind the timeline & inspector child panels ---
+    auto shadowFor = [&](juce::Rectangle<int> a) {
+        g.setColour(eg::col::shadow);
+        g.fillRoundedRectangle(a.toFloat().translated(7.0f, 8.0f), 16.0f);
+    };
+    shadowFor(timelineArea);
+    shadowFor(inspectorArea);
+
+    //--- right Global panel (painted here; its knobs/pills are child controls) ---
+    eg::drawSoftPanel(g, globalArea.toFloat(), 16.0f);
+
+    g.setColour(eg::col::ink3);
     g.setFont(9.0f);
-    g.setColour(juce::Colour(0xff3a3a6a));
-    g.drawText("BEATS", beatBtns[0].getX(), 9, 100, 10,
+    g.drawText("GLOBAL", globalArea.getX() + 16, globalArea.getY() + 12, 120, 12,
                juce::Justification::left, false);
-    g.drawText("GRID",  subdivBox.getX(), 9, 80, 10,
-               juce::Justification::left, false);
-    g.drawText("ANALOG",  analogSlider.getX() - 4, analogSlider.getBottom() + 2, 62, 10,
-               juce::Justification::centred, false);
-    g.drawText("HP",      hpSlider.getX(),          hpSlider.getBottom() + 2,  48, 10,
-               juce::Justification::centred, false);
-    g.drawText("LP",      lpSlider.getX(),           lpSlider.getBottom() + 2,  48, 10,
-               juce::Justification::centred, false);
-    g.drawText("LAYER", layerBox.getX(), 9, 50, 10, juce::Justification::left, false);
+
+    //--- knob labels ---
+    auto knobLabel = [&](juce::Slider& s, const juce::String& t) {
+        g.setColour(eg::col::ink2);
+        g.setFont(10.0f);
+        g.drawText(t, s.getX() - 10, s.getBottom() + 2, s.getWidth() + 20, 12,
+                   juce::Justification::centred, false);
+    };
+    knobLabel(hpSlider,    "HP");
+    knobLabel(lpSlider,    "LP");
+    knobLabel(driveSlider, "DRIVE");
+    knobLabel(inputSlider,  "IN");
+    knobLabel(outputSlider, "OUT");
+    g.setColour(eg::col::ink3);
+    g.setFont(10.0f);
+    g.drawText("ANALOG", analogSlider.getX() - 10, analogSlider.getBottom() + 2,
+               analogSlider.getWidth() + 20, 12, juce::Justification::centred, false);
+
+    //--- toggle labels (to the left of each pill) ---
+    g.setColour(eg::col::ink);
+    g.setFont(12.0f);
+    auto pillLabel = [&](juce::Component& c, const juce::String& t) {
+        g.drawText(t, globalArea.getX() + 16, c.getY(), c.getX() - globalArea.getX() - 20,
+                   c.getHeight(), juce::Justification::centredLeft, false);
+    };
+    pillLabel(filterDryBtn, "Filter dry");
+    pillLabel(satGlobalBtn, "Global drive");
 }
 
 //==============================================================================
 void EchoGridEditor::resized()
 {
-    auto area   = getLocalBounds();
-    auto topBar = area.removeFromTop(60);
-    inspector.setBounds(area.removeFromBottom(100));
-    timeline.setBounds(area);
+    auto area = getLocalBounds();
+    const int pad = 16;
+    area.reduce(pad, pad);
 
-    //--- analog knob (rightmost) ---
-    auto knobCol = topBar.removeFromRight(68);
-    analogSlider.setBounds(knobCol.getX() + 4, 3, 54, 54);
+    auto topBar = area.removeFromTop(54);
+    area.removeFromTop(12);
+    inspectorArea = area.removeFromBottom(92);
+    area.removeFromBottom(12);
 
-    //--- beat length buttons ---
-    int bx = 120, by = 21, bw = 26, bh = 18;
+    auto body = area;
+    globalArea = body.removeFromRight(212);
+    body.removeFromRight(16);
+    timelineArea = body;
+
+    timeline.setBounds(timelineArea);
+    inspector.setBounds(inspectorArea);
+
+    //--- top bar ---
+    const int rowY = topBar.getY() + 20;
+    const int h    = 26;
+    int x = topBar.getX() + 150;
+
+    const int bw = 28;
     for (int i = 0; i < 4; ++i)
-        beatBtns[i].setBounds(bx + i * (bw + 2), by, bw, bh);
+        beatBtns[i].setBounds(x + i * (bw + 3), rowY, bw, h);
+    x += 4 * (bw + 3) + 18;
 
-    //--- subdivision ComboBox ---
-    int sx = bx + 4 * (bw + 2) + 14;
-    subdivBox.setBounds(sx, by, 76, bh);
+    subdivBox.setBounds(x, rowY, 78, h);  x += 78 + 18;
+    layerBox.setBounds(x, rowY, 88, h);
 
-    //--- layer selector ---
-    layerBox.setBounds(sx + 78, by, 60, bh);
+    redoBtn.setBounds(topBar.getRight() - 30,       rowY, 30, h);
+    undoBtn.setBounds(topBar.getRight() - 30 - 34,  rowY, 30, h);
 
-    //--- undo / redo buttons ---
-    int ux = layerBox.getRight() + 14;
-    undoBtn.setBounds(ux,      by, 26, bh);
-    redoBtn.setBounds(ux + 28, by, 26, bh);
+    //--- global panel internals ---
+    const int gx     = globalArea.getX();
+    const int gw     = globalArea.getWidth();
+    const int innerX = gx + 16;
+    const int colW   = (gw - 32) / 2;
 
-    //--- filter knobs + filt-dry button ---
-    int fx = redoBtn.getRight() + 20;
-    hpSlider.setBounds(fx,      3, 48, 48);
-    lpSlider.setBounds(fx + 54, 3, 48, 48);
-    filterDryBtn.setBounds(fx + 110, by, 52, bh);
+    int ky  = globalArea.getY() + 36;
+    int ks  = 50;
+    hpSlider.setBounds(innerX        + (colW - ks) / 2, ky, ks, ks);
+    lpSlider.setBounds(innerX + colW + (colW - ks) / 2, ky, ks, ks);
 
+    int ky2 = ky + ks + 24;
+    int ks2 = 58;
+    driveSlider.setBounds (innerX        + (colW - ks2) / 2, ky2, ks2, ks2);
+    analogSlider.setBounds(innerX + colW + (colW - 48)  / 2, ky2 + 4, 48, 48);
+
+    int ty = ky2 + ks2 + 30;
+    const int pillW = 42, pillH = 24;
+    filterDryBtn.setBounds(globalArea.getRight() - 16 - pillW, ty,      pillW, pillH);
+    satGlobalBtn.setBounds(globalArea.getRight() - 16 - pillW, ty + 34, pillW, pillH);
+
+    //--- IN / OUT trim row at the bottom of the panel ---
+    int ky3 = ty + 34 + pillH + 22;
+    int ks3 = 50;
+    inputSlider.setBounds (innerX        + (colW - ks3) / 2, ky3, ks3, ks3);
+    outputSlider.setBounds(innerX + colW + (colW - ks3) / 2, ky3, ks3, ks3);
 }

@@ -7,9 +7,20 @@ EchoGridProcessor::EchoGridProcessor()
           .withInput ("Input",  juce::AudioChannelSet::stereo(), true)
           .withOutput("Output", juce::AudioChannelSet::stereo(), true))
 {
-    nodes.push_back({ 1.0f, 0.70f,  0.0f, 1.0f, true });
-    nodes.push_back({ 2.0f, 0.50f,  0.5f, 1.0f, true });
-    nodes.push_back({ 3.0f, 0.30f, -0.5f, 1.0f, true });
+    //--- default echoes: explicit field init (NOT positional) so adding/reordering
+    //    EchoNode fields can't silently land a value on the wrong one — e.g. the old
+    //    positional init was setting saturation=1 instead of active. ---
+    auto makeNode = [](float pos, float gain, float pan)
+    {
+        EchoNode n;
+        n.positionBeats = pos;   // probability=1, saturation=0, active=true,
+        n.gain          = gain;  // reverse=false come from the struct defaults
+        n.pan           = pan;
+        return n;
+    };
+    nodes.push_back(makeNode(1.0f, 0.70f,  0.0f));
+    nodes.push_back(makeNode(2.0f, 0.50f,  0.5f));
+    nodes.push_back(makeNode(3.0f, 0.30f, -0.5f));
 }
 
 EchoGridProcessor::~EchoGridProcessor() {}
@@ -40,6 +51,10 @@ void EchoGridProcessor::getStateInformation(juce::MemoryBlock& destData)
     root.setAttribute("lpCutoffHz",       (double)lpCutoffHz);
     root.setAttribute("hpCutoffHz",       (double)hpCutoffHz);
     root.setAttribute("filterDry",        filterDry);
+    root.setAttribute("satDrive",         (double)satDrive);
+    root.setAttribute("satGlobalOverride", satGlobalOverride);
+    root.setAttribute("inputGain",        (double)inputGain);
+    root.setAttribute("outputGain",       (double)outputGain);
 
     //--- echo nodes ---
     for (const auto& n : nodes)
@@ -71,6 +86,10 @@ void EchoGridProcessor::setStateInformation(const void* data, int sizeInBytes)
     lpCutoffHz       = (float)xml->getDoubleAttribute("lpCutoffHz",      20000.0);
     hpCutoffHz       = (float)xml->getDoubleAttribute("hpCutoffHz",      20.0);
     filterDry        = xml->getBoolAttribute("filterDry", false);
+    satDrive          = (float)xml->getDoubleAttribute("satDrive", 0.0);
+    satGlobalOverride = xml->getBoolAttribute("satGlobalOverride", false);
+    inputGain         = (float)xml->getDoubleAttribute("inputGain",  1.0);
+    outputGain        = (float)xml->getDoubleAttribute("outputGain", 1.0);
     //--- load snap step; support old preset files that stored an int subdivisions count ---
     if (xml->hasAttribute("snapStepBeats"))
         snapStepBeats = (float)xml->getDoubleAttribute("snapStepBeats", 0.25);
@@ -125,6 +144,7 @@ void EchoGridProcessor::prepareToPlay(double sampleRate, int)
         st.gainEnvelope = 1.0f;
         st.timingJitter = 0.0f;
         st.fired        = true;
+        st.tape.reset();
     }
     fallbackBeats = 0.0;
 
@@ -139,6 +159,9 @@ void EchoGridProcessor::prepareToPlay(double sampleRate, int)
     }
     lastLpHz = -1.0f; lastHpHz = -1.0f;  // force coefficient update on first block
     updateFilterCoefficients();
+
+    //--- reset the global tape stage (high-cut, compression, head bump, gain comp) ---
+    globalTape.reset();
 }
 
 void EchoGridProcessor::releaseResources()
@@ -308,9 +331,16 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
     //--- analog timing jitter: disabled until the analog knob is re-enabled.
     //    The decay keeps timingJitter settled at 0 so forward echo offsets stay clean.
+    //    Also refresh each tap's per-tap tape-stage coefficients for its SAT amount
+    //    (no-op inside setDrive when the amount hasn't changed). ---
     const int activeCount = juce::jmin((int)nodes.size(), kMaxNodes);
     for (int i = 0; i < activeCount; ++i)
+    {
         nodeStates[i].timingJitter *= 0.998f;
+        if (!satGlobalOverride && nodes[i].saturation > 0.001f)
+            nodeStates[i].tape.setDrive(juce::jlimit(0.0f, 1.0f, nodes[i].saturation),
+                                        currentSampleRate);
+    }
 
     //--- smoothing coefficient: ~8ms click-free gain transitions ---
     const float smoothCoeff = 1.0f - std::exp(-1.0f / (0.008f * (float)currentSampleRate));
@@ -319,12 +349,41 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     if (std::abs(lpCutoffHz - lastLpHz) > 0.5f || std::abs(hpCutoffHz - lastHpHz) > 0.5f)
         updateFilterCoefficients();
 
+    //--- tape stage drive, snapshot once per block.  The GLOBAL tape toggle is a
+    //    MODE switch, so the two saturation sources stay independent:
+    //      • toggle OFF → per-tap mode: only the SAT sliders colour the echoes; the
+    //        DRIVE knob does NOTHING (the global stage is bypassed).
+    //      • toggle ON  → global mode: the whole output (dry + echoes) rides the
+    //        DRIVE knob and the per-tap SAT is ignored.
+    //    The per-block coefficient update (comp / bump / high-cut / gain-comp) lives
+    //    inside TapeStage::setDrive. ---
+    //--- global input / output trim, snapshot once per block ---
+    const float inG  = inputGain;
+    const float outG = outputGain;
+
+    const float gDrive    = juce::jlimit(0.0f, 1.0f, satDrive);
+    const bool  gOverride = satGlobalOverride;
+    const bool  globalOn  = gOverride && gDrive > 0.0001f;
+    if (globalOn)
+        globalTape.setDrive(gDrive, currentSampleRate);
+
+    //--- global-path pre-gain: the whole-mix stage saturates the echoes at their
+    //    already-attenuated tap-gain level (and dilutes them with the clean dry),
+    //    so for the same drive it grits LESS than a per-tap SAT slider (which
+    //    saturates each echo at full level).  This drive-linked pre-gain pushes the
+    //    global shaper harder so its 100% matches a slider at 100%; the stage's
+    //    gain compensation keeps loudness constant.  CALIBRATION: the 1.0 multiplier
+    //    (→ up to ×2 / +6 dB at full drive) — raise for more global bite. ---
+    const float gPreGain = 1.0f + gDrive * 1.0f;
+
     //--- sample-by-sample audio processing loop ---
     //    dry signal + echo nodes + filters + write to circular delay buffer.
     for (int s = 0; s < numSamples; ++s)
     {
-        const float rawL = buffer.getSample(0, s);
-        const float rawR = (numChannels > 1) ? buffer.getSample(1, s) : rawL;
+        //--- global INPUT trim: scales the signal entering the whole effect, so it
+        //    feeds the dry, the delay-buffer record (echoes) and the saturation alike ---
+        const float rawL = buffer.getSample(0, s) * inG;
+        const float rawR = (numChannels > 1) ? buffer.getSample(1, s) * inG : rawL;
 
         //--- dry signal mix: apply gain and pan to the direct input path ---
         const float dryAngle = (dry.pan * 0.5f + 0.5f) * juce::MathConstants<float>::halfPi;
@@ -443,15 +502,12 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
                 echoR = (numChannels > 1) ? delayBuffer.getSample(1, readPos) : echoL;
             }
 
-            //--- tape saturation is disabled for now.
-            //    The saturation code is preserved but bypassed so the reverse
-            //    playback path remains simpler during debugging.
-            // {
-            //     const float drive = 1.0f + node.saturation * node.saturation * 10.0f;
-            //     const float norm  = 1.0f / std::tanh(drive);
-            //     echoL = std::tanh(echoL * drive) * norm;
-            //     echoR = std::tanh(echoR * drive) * norm;
-            // }
+            //--- per-tap SAT: this echo through its OWN tape stage before it joins
+            //    the mix — identical DSP to the global drive, so the SAT slider and
+            //    the DRIVE knob sound the same for the same amount.  Skipped when the
+            //    global override is on (then everything rides the global tape only). ---
+            if (!gOverride && node.saturation > 0.001f)
+                state.tape.process(echoL, echoR, node.saturation, numChannels > 1);
 
             wetL += echoL * state.gainEnvelope * std::cos(angle);
             if (numChannels > 1)
@@ -472,10 +528,22 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
         const float outDryL = filterDry ? filtDryL : dryL;
         const float outDryR = filterDry ? filtDryR : dryR;
 
-        //--- output: dry + wet ---
-        buffer.setSample(0, s, outDryL + wetL);
+        //--- output: dry + wet, then the GLOBAL tape stage (whole signal "through
+        //    the 424") — same TapeStage as each tap: compression → soft-clip → head
+        //    bump → high-cut → gain compensation.  Zero added latency, so the dry
+        //    still monitors live.  Only runs in GLOBAL mode (see globalOn). ---
+        float outL = outDryL + wetL;
+        float outR = (numChannels > 1) ? (outDryR + wetR) : outL;
+        if (globalOn)
+            globalTape.process(outL, outR, gDrive, numChannels > 1, gPreGain);
+
+        //--- global OUTPUT trim: final level after the whole chain ---
+        outL *= outG;
+        outR *= outG;
+
+        buffer.setSample(0, s, outL);
         if (numChannels > 1)
-            buffer.setSample(1, s, outDryR + wetR);
+            buffer.setSample(1, s, outR);
 
         //--- write raw input to delay buffer ---
         delayBuffer.setSample(0, writePosition, rawL);

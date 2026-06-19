@@ -1,21 +1,20 @@
 #include "NodeTimeline.h"
+#include "Theme.h"
 
 //==============================================================================
 // Helpers
 //==============================================================================
 static juce::Colour panToColour(float pan)
 {
-    const juce::Colour left  (0xff5599ff);
-    const juce::Colour centre(0xffe0e0ff);
-    const juce::Colour right (0xffff9944);
-    return pan < 0.0f ? centre.interpolatedWith(left,  -pan)
-                      : centre.interpolatedWith(right,  pan);
+    //--- pan encoded on the palette: left = blue, centre = lilac, right = pink ---
+    return pan < 0.0f ? eg::col::lilac.interpolatedWith(eg::col::blue, -pan)
+                      : eg::col::lilac.interpolatedWith(eg::col::pink,  pan);
 }
 
 static juce::Colour satToColour(float sat)
 {
-    //--- neutral cream at 0 → deep orange-red at 1 (tape warmth palette) ---
-    return juce::Colour(0xffe8d8c0).interpolatedWith(juce::Colour(0xffff4400), sat);
+    //--- soft lilac at 0 → deep rose at 1 ---
+    return eg::col::lilacSoft.interpolatedWith(juce::Colour(0xffe07aa6), sat);
 }
 
 //==============================================================================
@@ -304,8 +303,13 @@ void NodeTimeline::paint(juce::Graphics& g)
     const float w = (float)getWidth();
     const float h = (float)getHeight();
 
-    //--- background ---
-    g.fillAll(juce::Colour(0xff141422));
+    //--- rounded panel background (corners left unpainted so the editor's
+    //    offset shadow and window background show through them) ---
+    auto panelR = juce::Rectangle<float>(0.5f, 0.5f, w - 1.0f, h - 1.0f);
+    g.setColour(eg::col::surface);
+    g.fillRoundedRectangle(panelR, 16.0f);
+    g.setColour(eg::col::line);
+    g.drawRoundedRectangle(panelR, 16.0f, 1.0f);
 
     //--- grid lines: step is an absolute musical value (e.g. 0.25 = 1/16 note),
     //    independent of bar length.  Beat lines (integer positions) are drawn brighter. ---
@@ -318,7 +322,7 @@ void NodeTimeline::paint(juce::Graphics& g)
         float x      = beatToX(pos);
         float nearest = std::round(pos);
         bool  isBeat  = std::abs(pos - nearest) < step * 0.05f;  // within 5% of a beat position
-        g.setColour(isBeat ? juce::Colour(0xff3a3a5a) : juce::Colour(0xff22223a));
+        g.setColour(isBeat ? juce::Colour(0xffe5dcef) : eg::col::line);
         g.drawVerticalLine((int)x, kPadY * 0.5f, h - kPadY * 0.5f);
     }
 
@@ -326,7 +330,7 @@ void NodeTimeline::paint(juce::Graphics& g)
     //    match what the user hears in their DAW.  Right edge is not labelled
     //    (it is the next bar's beat 1, same as DRY). ---
     g.setFont(10.0f);
-    g.setColour(juce::Colour(0xff5555aa));
+    g.setColour(eg::col::ink3);
     g.drawText("1", (int)beatToX(0.0f) - 8, 4, 16, 12,
                juce::Justification::centred, false);
     for (int b = 1; b < (int)std::round(processor.gridLengthBeats); ++b)
@@ -334,8 +338,8 @@ void NodeTimeline::paint(juce::Graphics& g)
                    juce::Justification::centred, false);
 
     //--- bottom baseline ---
-    g.setColour(juce::Colour(0xff3a3a5a));
-    g.drawHorizontalLine((int)(h - kPadY * 0.5f), 0.0f, w);
+    g.setColour(juce::Colour(0xffd9cfe4));
+    g.drawHorizontalLine((int)(h - kPadY * 0.5f), kPadX, w - kPadX);
 
     //--- helper: draw one node ---
     //    inactive nodes are rendered grey + dimmed so they read as "off"
@@ -343,7 +347,7 @@ void NodeTimeline::paint(juce::Graphics& g)
     auto drawNode = [&](float x, float y, float pan, float probability,
                         bool isReversed, bool active, bool selected)
     {
-        auto  c     = active ? panToColour(pan) : juce::Colour(0xff555568);
+        auto  c     = active ? panToColour(pan) : juce::Colour(0xffc9c2d3);
         float alpha = active ? juce::jmap(probability, 0.0f, 1.0f, 0.15f, 1.0f) : 0.30f;
 
         g.setColour(c.withAlpha(0.25f * alpha));
@@ -364,13 +368,13 @@ void NodeTimeline::paint(juce::Graphics& g)
                 arrow.addTriangle(x + 4.0f, y - 4.5f, x - 3.5f, y, x + 4.0f, y + 4.5f);
             else
                 arrow.addTriangle(x - 4.0f, y - 4.5f, x + 3.5f, y, x - 4.0f, y + 4.5f);
-            g.setColour(juce::Colour(0xff141422).withAlpha(alpha));
+            g.setColour(juce::Colours::white.withAlpha(juce::jmin(1.0f, alpha + 0.15f)));
             g.fillPath(arrow);
         }
 
         if (selected)
         {
-            g.setColour(juce::Colours::white.withAlpha(0.8f));
+            g.setColour(eg::col::ink.withAlpha(0.85f));
             g.drawEllipse(x - kNodeRadius - 2.0f, y - kNodeRadius - 2.0f,
                           (kNodeRadius + 2.0f) * 2.0f, (kNodeRadius + 2.0f) * 2.0f, 1.5f);
         }
@@ -382,7 +386,7 @@ void NodeTimeline::paint(juce::Graphics& g)
         float y = gainToY(processor.dry.gain);
         drawNode(x, y, processor.dry.pan, 1.0f, false, true, selectedIndex == -2);
 
-        g.setColour(juce::Colour(0xff141422));
+        g.setColour(eg::col::surface);
         g.fillRect(x - 3.5f, y - 3.5f, 7.0f, 7.0f);
         g.setColour(panToColour(processor.dry.pan));
         g.drawRect(x - 3.5f, y - 3.5f, 7.0f, 7.0f, 1.5f);
@@ -410,7 +414,7 @@ void NodeTimeline::paint(juce::Graphics& g)
     {
         float nx = beatToX(nodes[i].positionBeats);
         float ny = gainToY(nodes[i].gain);
-        g.setColour(juce::Colour(0xff6677aa).withAlpha(nodes[i].active ? 0.9f : 0.4f));
+        g.setColour(eg::col::ink3.withAlpha(nodes[i].active ? 1.0f : 0.5f));
         //--- +1 because DRY = beat 1, so positionBeats=1 → musical beat 2 etc. ---
         g.drawText(juce::String(nodes[i].positionBeats + 1.0f, 2),
                    (int)nx - 18, (int)(ny - kNodeRadius - 14), 36, 11,
@@ -420,7 +424,7 @@ void NodeTimeline::paint(juce::Graphics& g)
     //--- overlay: dim gain layer when any edit mode is active ---
     if (editMode != EditMode::None)
     {
-        g.setColour(juce::Colour(0x99000000));
+        g.setColour(eg::col::surface.withAlpha(0.68f));
         g.fillRect(0.0f, 0.0f, w, h);
     }
 
@@ -428,11 +432,11 @@ void NodeTimeline::paint(juce::Graphics& g)
     if (editMode == EditMode::Pan)
     {
         float panCy = panToY(0.0f);
-        g.setColour(juce::Colour(0xff3a3a5a));
+        g.setColour(juce::Colour(0xffd9cfe4));
         g.drawHorizontalLine((int)panCy, kPadX, w - kPadX);
 
         g.setFont(9.0f);
-        g.setColour(juce::Colour(0xff5566aa));
+        g.setColour(eg::col::ink3);
         g.drawText("L", 4, (int)panToY(-1.0f) - 6, 14, 12, juce::Justification::centred, false);
         g.drawText("R", 4, (int)panToY( 1.0f) - 6, 14, 12, juce::Justification::centred, false);
 
@@ -449,7 +453,7 @@ void NodeTimeline::paint(juce::Graphics& g)
             g.setColour(c.withAlpha(alpha));
             g.fillEllipse(nx - kNodeRadius, ny - kNodeRadius, kNodeRadius * 2.0f, kNodeRadius * 2.0f);
             if (inSel) {
-                g.setColour(juce::Colours::white.withAlpha(0.8f));
+                g.setColour(eg::col::ink.withAlpha(0.85f));
                 g.drawEllipse(nx - kNodeRadius - 2.0f, ny - kNodeRadius - 2.0f,
                               (kNodeRadius + 2.0f) * 2.0f, (kNodeRadius + 2.0f) * 2.0f, 1.5f);
             }
@@ -462,13 +466,13 @@ void NodeTimeline::paint(juce::Graphics& g)
             g.drawLine(nx, panCy, nx, ny, 2.0f);
             g.setColour(c.withAlpha(0.85f));
             g.fillEllipse(nx - kNodeRadius, ny - kNodeRadius, kNodeRadius * 2.0f, kNodeRadius * 2.0f);
-            g.setColour(juce::Colour(0xff141422));
+            g.setColour(eg::col::surface);
             g.fillRect(nx - 3.5f, ny - 3.5f, 7.0f, 7.0f);
             g.setColour(c.withAlpha(0.85f));
             g.drawRect(nx - 3.5f, ny - 3.5f, 7.0f, 7.0f, 1.5f);
         }
         g.setFont(9.0f);
-        g.setColour(juce::Colour(0xff7788cc).withAlpha(0.7f));
+        g.setColour(eg::col::blue.withAlpha(0.95f));
         g.drawText("PAN", (int)(w - 46.0f), 6, 40, 10, juce::Justification::centredRight, false);
     }
 
@@ -476,11 +480,11 @@ void NodeTimeline::paint(juce::Graphics& g)
     if (editMode == EditMode::Sat)
     {
         float satBase = satToY(0.0f);
-        g.setColour(juce::Colour(0xff3a3a5a));
+        g.setColour(juce::Colour(0xffd9cfe4));
         g.drawHorizontalLine((int)satBase, kPadX, w - kPadX);
 
         g.setFont(9.0f);
-        g.setColour(juce::Colour(0xff886644));
+        g.setColour(eg::col::ink3);
         g.drawText("0",   4, (int)satToY(0.0f) - 6, 18, 12, juce::Justification::centred, false);
         g.drawText("MAX", 4, (int)satToY(1.0f) - 6, 26, 12, juce::Justification::centred, false);
 
@@ -492,18 +496,18 @@ void NodeTimeline::paint(juce::Graphics& g)
             auto  c     = satToColour(nodes[i].saturation);
             bool  inSel = std::find(multiSelection.begin(), multiSelection.end(), i)
                           != multiSelection.end();
-            g.setColour(juce::Colour(0xffff7733).withAlpha(0.35f * alpha));
+            g.setColour(eg::col::pink.withAlpha(0.5f * alpha));
             g.drawLine(nx, satBase, nx, ny, 2.0f);
             g.setColour(c.withAlpha(alpha));
             g.fillEllipse(nx - kNodeRadius, ny - kNodeRadius, kNodeRadius * 2.0f, kNodeRadius * 2.0f);
             if (inSel) {
-                g.setColour(juce::Colours::white.withAlpha(0.8f));
+                g.setColour(eg::col::ink.withAlpha(0.85f));
                 g.drawEllipse(nx - kNodeRadius - 2.0f, ny - kNodeRadius - 2.0f,
                               (kNodeRadius + 2.0f) * 2.0f, (kNodeRadius + 2.0f) * 2.0f, 1.5f);
             }
         }
         g.setFont(9.0f);
-        g.setColour(juce::Colour(0xffcc7733).withAlpha(0.7f));
+        g.setColour(juce::Colour(0xffe07aa6).withAlpha(0.95f));
         g.drawText("SAT", (int)(w - 46.0f), 6, 40, 10, juce::Justification::centredRight, false);
     }
 
@@ -515,9 +519,9 @@ void NodeTimeline::paint(juce::Graphics& g)
             std::min(shiftSelectStart.y, shiftSelectCurrent.y),
             std::abs(shiftSelectCurrent.x - shiftSelectStart.x),
             std::abs(shiftSelectCurrent.y - shiftSelectStart.y));
-        g.setColour(juce::Colour(0xff4455bb).withAlpha(0.12f));
+        g.setColour(eg::col::lilac.withAlpha(0.18f));
         g.fillRect(selRect);
-        g.setColour(juce::Colour(0xff7788dd).withAlpha(0.7f));
+        g.setColour(eg::col::lilacDeep.withAlpha(0.8f));
         g.drawRect(selRect, 1.5f);
     }
 
@@ -529,9 +533,9 @@ void NodeTimeline::paint(juce::Graphics& g)
         auto  str = juce::String((int)std::round(nodes[probTooltipIdx].probability * 100)) + "%";
 
         juce::Rectangle<float> pill(nx - 15.0f, ny - kNodeRadius - 27.0f, 32.0f, 16.0f);
-        g.setColour(juce::Colour(0xff252540));
-        g.fillRoundedRectangle(pill, 4.0f);
-        g.setColour(juce::Colour(0xff99aadd));
+        g.setColour(eg::col::ink);
+        g.fillRoundedRectangle(pill, 5.0f);
+        g.setColour(juce::Colours::white);
         g.setFont(9.0f);
         g.drawText(str, pill.toNearestInt(), juce::Justification::centred, false);
     }
