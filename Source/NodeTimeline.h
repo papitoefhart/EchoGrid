@@ -21,7 +21,7 @@ public:
     void clearSelection() { multiSelection.clear(); selectedIndex = -1; repaint(); }
 
     //--- overlay edit mode ---
-    enum class EditMode { None, Pan, Sat };
+    enum class EditMode { None, Pan, Sat, Pitch };
     void setEditMode(EditMode m) { editMode = m; repaint(); }
 
     //--- undo helpers (also called by NodeInspector and PluginEditor) ---
@@ -96,6 +96,19 @@ private:
     float yToSat(float y)   const;
     int   satNodeAt(juce::Point<float>) const;
     void  placeSatLineBetween(juce::Point<float> from, juce::Point<float> to);
+
+    //--- pitch edit state (per-tap semitones, ±kPitchRange, snapped to semitones) ---
+    static constexpr float kPitchRange = 12.0f;
+    int   pitchDragIdx        = -1;
+    float pitchDragStartPitch = 0.0f;
+    std::vector<float> multiPitchAtDragStart;
+    bool               pitchLineDrawing = false;
+    juce::Point<float> pitchLastLinePos;
+
+    float pitchToY(float semi) const;
+    float yToPitch(float y)    const;
+    int   pitchNodeAt(juce::Point<float>) const;
+    void  placePitchLineBetween(juce::Point<float> from, juce::Point<float> to);
 
     //--- probability tooltip ---
     int  probTooltipIdx  = -1;

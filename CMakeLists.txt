@@ -127,3 +127,13 @@ target_link_libraries(EchoGrid_unit_test PRIVATE EchoGrid)
 target_include_directories(EchoGrid_unit_test PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/_deps/juce-src/modules)
 target_compile_features(EchoGrid_unit_test PRIVATE cxx_std_17)
 
+# ── Offscreen UI render (dev-only, for layout verification without a DAW) ──────
+add_executable(EchoGrid_render
+    tests/render_ui.cpp
+)
+target_include_directories(EchoGrid_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/Source)
+target_include_directories(EchoGrid_render PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/EchoGrid_artefacts/JuceLibraryCode)
+target_link_libraries(EchoGrid_render PRIVATE EchoGrid)
+target_include_directories(EchoGrid_render PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/_deps/juce-src/modules)
+target_compile_features(EchoGrid_render PRIVATE cxx_std_17)
+

@@ -55,6 +55,7 @@ void EchoGridProcessor::getStateInformation(juce::MemoryBlock& destData)
     root.setAttribute("satGlobalOverride", satGlobalOverride);
     root.setAttribute("inputGain",        (double)inputGain);
     root.setAttribute("outputGain",       (double)outputGain);
+    root.setAttribute("pitchGrainMs",     (double)pitchGrainMs);
 
     //--- echo nodes ---
     for (const auto& n : nodes)
@@ -69,6 +70,7 @@ void EchoGridProcessor::getStateInformation(juce::MemoryBlock& destData)
         e->setAttribute("reverse",       n.reverse);
         e->setAttribute("reverseLength", (double)n.reverseLength);
         e->setAttribute("reverseLock",   n.reverseLock);
+        e->setAttribute("pitchSemitones",(double)n.pitchSemitones);
     }
 
     copyXmlToBinary(root, destData);
@@ -90,6 +92,7 @@ void EchoGridProcessor::setStateInformation(const void* data, int sizeInBytes)
     satGlobalOverride = xml->getBoolAttribute("satGlobalOverride", false);
     inputGain         = (float)xml->getDoubleAttribute("inputGain",  1.0);
     outputGain        = (float)xml->getDoubleAttribute("outputGain", 1.0);
+    pitchGrainMs      = (float)xml->getDoubleAttribute("pitchGrainMs", 30.0);
     //--- load snap step; support old preset files that stored an int subdivisions count ---
     if (xml->hasAttribute("snapStepBeats"))
         snapStepBeats = (float)xml->getDoubleAttribute("snapStepBeats", 0.25);
@@ -117,6 +120,7 @@ void EchoGridProcessor::setStateInformation(const void* data, int sizeInBytes)
         n.reverse       = e->getBoolAttribute("reverse", false);
         n.reverseLength = (float)e->getDoubleAttribute("reverseLength", 1.0);
         n.reverseLock   = e->getBoolAttribute("reverseLock", true);
+        n.pitchSemitones= (float)e->getDoubleAttribute("pitchSemitones", 0.0);
         nodes.push_back(n);
     }
 }
@@ -145,6 +149,7 @@ void EchoGridProcessor::prepareToPlay(double sampleRate, int)
         st.timingJitter = 0.0f;
         st.fired        = true;
         st.tape.reset();
+        st.pitch.reset();
     }
     fallbackBeats = 0.0;
 
@@ -292,6 +297,15 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     //--- reverse splice crossfade length (~4 ms): short seam fade that de-clicks
     //    window boundaries without a second stream (which would ghost). ---
     const int spliceXfade = juce::jmax(1, (int)(0.004 * currentSampleRate));
+
+    //--- per-tap WSOLA pitch shifter params (only used by forward taps with
+    //    pitchSemitones ≠ 0).  Frame = user GRAIN length; search = how far the
+    //    correlation hunts for a phase-aligned splice (±~14 ms covers low notes);
+    //    corr = correlation window (~8 ms). ---
+    const int pitchFrame  = juce::jlimit(64, bufSize / 4,
+        (int)(juce::jlimit(5.0f, 400.0f, pitchGrainMs) * 0.001f * currentSampleRate));
+    const int pitchSearch = juce::jmax(8, (int)(0.014 * currentSampleRate));   // ±~14 ms
+    const int pitchCorr   = juce::jmax(8, (int)(0.012 * currentSampleRate));   // ~12 ms (covers low notes)
 
     //--- cache a finite tail length for the host: the longest active echo delay.
     //    Reverse nodes need ~2×D (record D, then play it back), and there's no
@@ -489,17 +503,29 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
                           : echoL;
                 }
             }
-            else
+            else if (std::abs(node.pitchSemitones) < 0.01f)
             {
-                //--- forward echo playback path ---
-                //    normal delay read from the circular buffer, with any jitter
-                //    currently disabled.
+                //--- forward echo playback path (no pitch) ---
+                //    normal integer delay read from the circular buffer, with any
+                //    jitter currently disabled.  Bit-identical to the original. ---
                 const int readOffset = juce::jlimit(1, bufSize - 1,
                     baseOffset + static_cast<int>(state.timingJitter));
                 const int readPos = (writePosition - readOffset + bufSize) % bufSize;
 
                 echoL = delayBuffer.getSample(0, readPos);
                 echoR = (numChannels > 1) ? delayBuffer.getSample(1, readPos) : echoL;
+            }
+            else
+            {
+                //--- forward echo with PITCH SHIFT: per-tap WSOLA shifter (see
+                //    PitchShifter).  Phase-coherent splices = clean, not granular;
+                //    pitch is exact; the grain start re-anchors to the tap delay so
+                //    the echo stays on its beat.  Zero added latency to the dry. ---
+                const float ratio = std::pow(2.0f, node.pitchSemitones / 12.0f);
+                state.pitch.process(delayBuffer, writePosition, bufSize,
+                                    (float)baseOffset + state.timingJitter, ratio,
+                                    pitchFrame, pitchSearch, pitchCorr,
+                                    numChannels > 1, echoL, echoR);
             }
 
             //--- per-tap SAT: this echo through its OWN tape stage before it joins

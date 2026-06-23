@@ -17,6 +17,14 @@ static juce::Colour satToColour(float sat)
     return eg::col::lilacSoft.interpolatedWith(juce::Colour(0xffe07aa6), sat);
 }
 
+static juce::Colour pitchToColour(float semi)
+{
+    //--- unison lilac at 0; cool blue for down, warm pink for up ---
+    float t = juce::jlimit(0.0f, 1.0f, std::abs(semi) / 12.0f);
+    return semi < 0.0f ? eg::col::lilac.interpolatedWith(eg::col::blue, t)
+                       : eg::col::lilac.interpolatedWith(eg::col::pink, t);
+}
+
 //==============================================================================
 namespace {
 struct NodeAction : public juce::UndoableAction
@@ -239,6 +247,58 @@ void NodeTimeline::placeSatLineBetween(juce::Point<float> from, juce::Point<floa
             sat = yToSat(from.y + t * (to.y - from.y));
         }
         n.saturation = sat;
+    }
+}
+
+//==============================================================================
+// Pitch overlay helpers — ±kPitchRange semitones, top = up; yToPitch snaps to
+// whole semitones so drawn taps land on clean intervals.
+//==============================================================================
+float NodeTimeline::pitchToY(float semi) const
+{
+    float usable = (float)getHeight() - 2.0f * kPadY;
+    float n = juce::jlimit(-kPitchRange, kPitchRange, semi);
+    return kPadY + (kPitchRange - n) / (2.0f * kPitchRange) * usable;
+}
+
+float NodeTimeline::yToPitch(float y) const
+{
+    float usable = (float)getHeight() - 2.0f * kPadY;
+    float n = kPitchRange - (y - kPadY) / usable * (2.0f * kPitchRange);
+    return std::round(juce::jlimit(-kPitchRange, kPitchRange, n));  // snap to semitones
+}
+
+int NodeTimeline::pitchNodeAt(juce::Point<float> p) const
+{
+    const float xThresh = kNodeRadius + 4.0f;
+    int   bestIdx  = -1;
+    float bestDist = xThresh + 1.0f;
+    for (int i = 0; i < (int)processor.nodes.size(); ++i)
+    {
+        float dx = std::abs(p.x - beatToX(processor.nodes[i].positionBeats));
+        if (dx <= xThresh && dx < bestDist) { bestDist = dx; bestIdx = i; }
+    }
+    return bestIdx;
+}
+
+void NodeTimeline::placePitchLineBetween(juce::Point<float> from, juce::Point<float> to)
+{
+    float xA    = std::min(from.x, to.x);
+    float xB    = std::max(from.x, to.x);
+    float xSpan = to.x - from.x;
+    const juce::ScopedLock sl(processor.getCallbackLock());
+    for (auto& n : processor.nodes)
+    {
+        float nx = beatToX(n.positionBeats);
+        if (nx < xA - kNodeRadius || nx > xB + kNodeRadius) continue;
+        float semi;
+        if (std::abs(xSpan) < 1.0f)
+            semi = yToPitch((from.y + to.y) * 0.5f);
+        else {
+            float t = juce::jlimit(0.0f, 1.0f, (nx - from.x) / xSpan);
+            semi = yToPitch(from.y + t * (to.y - from.y));
+        }
+        n.pitchSemitones = semi;
     }
 }
 
@@ -511,6 +571,51 @@ void NodeTimeline::paint(juce::Graphics& g)
         g.drawText("SAT", (int)(w - 46.0f), 6, 40, 10, juce::Justification::centredRight, false);
     }
 
+    //--- pitch overlay ---
+    if (editMode == EditMode::Pitch)
+    {
+        float pitchCy = pitchToY(0.0f);
+        g.setColour(juce::Colour(0xffd9cfe4));
+        g.drawHorizontalLine((int)pitchCy, kPadX, w - kPadX);
+
+        g.setFont(9.0f);
+        g.setColour(eg::col::ink3);
+        g.drawText("+12", 2, (int)pitchToY( 12.0f) - 6, 22, 12, juce::Justification::centred, false);
+        g.drawText("0",   2, (int)pitchToY(  0.0f) - 6, 22, 12, juce::Justification::centred, false);
+        g.drawText("-12", 2, (int)pitchToY(-12.0f) - 6, 22, 12, juce::Justification::centred, false);
+
+        for (int i = 0; i < (int)nodes.size(); ++i)
+        {
+            float nx    = beatToX(nodes[i].positionBeats);
+            float ny    = pitchToY(nodes[i].pitchSemitones);
+            float alpha = nodes[i].active ? 0.9f : 0.4f;
+            auto  c     = pitchToColour(nodes[i].pitchSemitones);
+            bool  inSel = std::find(multiSelection.begin(), multiSelection.end(), i)
+                          != multiSelection.end();
+            g.setColour(c.withAlpha(0.4f * alpha));
+            g.drawLine(nx, pitchCy, nx, ny, 2.0f);
+            g.setColour(c.withAlpha(alpha));
+            g.fillEllipse(nx - kNodeRadius, ny - kNodeRadius, kNodeRadius * 2.0f, kNodeRadius * 2.0f);
+            if (inSel) {
+                g.setColour(eg::col::ink.withAlpha(0.85f));
+                g.drawEllipse(nx - kNodeRadius - 2.0f, ny - kNodeRadius - 2.0f,
+                              (kNodeRadius + 2.0f) * 2.0f, (kNodeRadius + 2.0f) * 2.0f, 1.5f);
+            }
+            //--- semitone readout above the dot (skip 0 = unison) ---
+            int st = (int)std::round(nodes[i].pitchSemitones);
+            if (st != 0) {
+                g.setColour(eg::col::ink2.withAlpha(alpha));
+                g.setFont(9.0f);
+                juce::String lbl = (st > 0 ? "+" : "") + juce::String(st);
+                g.drawText(lbl, (int)nx - 16, (int)(ny - kNodeRadius - 13), 32, 11,
+                           juce::Justification::centred, false);
+            }
+        }
+        g.setFont(9.0f);
+        g.setColour(eg::col::lilacDeep.withAlpha(0.95f));
+        g.drawText("PITCH", (int)(w - 50.0f), 6, 44, 10, juce::Justification::centredRight, false);
+    }
+
     //--- rubber-band rectangle during Shift+drag ---
     if (shiftSelecting)
     {
@@ -679,6 +784,17 @@ void NodeTimeline::mouseDown(const juce::MouseEvent& e)
             [this](auto a, auto b){ placeSatLineBetween(a, b); });
         return;
     }
+    if (editMode == EditMode::Pitch) {
+        handleOverlayDown(
+            [this](auto p){ return pitchNodeAt(p); },
+            [this](float y){ return yToPitch(y); },
+            [this](int i){ return processor.nodes[i].pitchSemitones; },
+            [this](int i, float v){ processor.nodes[i].pitchSemitones = v; },
+            pitchDragIdx, pitchDragStartPitch, multiPitchAtDragStart,
+            pitchLineDrawing, pitchLastLinePos,
+            [this](auto a, auto b){ placePitchLineBetween(a, b); });
+        return;
+    }
 
     //--- Option + click: enter line-draw mode ---
     if (e.mods.isAltDown() && !e.mods.isRightButtonDown())
@@ -831,8 +947,9 @@ void NodeTimeline::mouseDrag(const juce::MouseEvent& e)
         const auto& ns = processor.nodes;
         for (int i = 0; i < (int)ns.size(); ++i)
         {
-            float ny = (editMode == EditMode::Pan) ? panToY(ns[i].pan)
-                     : (editMode == EditMode::Sat) ? satToY(ns[i].saturation)
+            float ny = (editMode == EditMode::Pan)   ? panToY(ns[i].pan)
+                     : (editMode == EditMode::Sat)   ? satToY(ns[i].saturation)
+                     : (editMode == EditMode::Pitch) ? pitchToY(ns[i].pitchSemitones)
                      : gainToY(ns[i].gain);
             if (selRect.contains(beatToX(ns[i].positionBeats), ny))
                 multiSelection.push_back(i);
@@ -887,6 +1004,30 @@ void NodeTimeline::mouseDrag(const juce::MouseEvent& e)
         repaint();  return;
     }
     if (editMode == EditMode::Sat) return;  // no other action in sat mode
+
+    //--- pitch line draw ---
+    if (editMode == EditMode::Pitch && pitchLineDrawing)
+    {
+        placePitchLineBetween(pitchLastLinePos, e.position);
+        pitchLastLinePos = e.position;  repaint();  return;
+    }
+    //--- pitch dot drag ---
+    if (editMode == EditMode::Pitch && pitchDragIdx >= 0 && pitchDragIdx < (int)processor.nodes.size())
+    {
+        float semi  = yToPitch(e.position.y);
+        bool  inSel = std::find(multiSelection.begin(), multiSelection.end(), pitchDragIdx)
+                      != multiSelection.end();
+        const juce::ScopedLock sl(processor.getCallbackLock());
+        if (inSel && multiSelection.size() > 1 && !multiPitchAtDragStart.empty()) {
+            float delta = semi - pitchDragStartPitch;
+            for (int k = 0; k < (int)std::min(multiSelection.size(), multiPitchAtDragStart.size()); ++k)
+                if (multiSelection[k] >= 0 && multiSelection[k] < (int)processor.nodes.size())
+                    processor.nodes[multiSelection[k]].pitchSemitones =
+                        juce::jlimit(-kPitchRange, kPitchRange, std::round(multiPitchAtDragStart[k] + delta));
+        } else { processor.nodes[pitchDragIdx].pitchSemitones = semi; }
+        repaint();  return;
+    }
+    if (editMode == EditMode::Pitch) return;  // no other action in pitch mode
 
     //--- line-draw mode: fill snap positions as mouse sweeps ---
     if (drawingLine)
@@ -954,11 +1095,13 @@ void NodeTimeline::mouseUp(const juce::MouseEvent& e)
     drawingLine    = false;
     shiftSelecting = false;
     dragIndex      = -1;
-    panDragIdx     = -1;  panLineDrawing = false;
-    satDragIdx     = -1;  satLineDrawing = false;
+    panDragIdx     = -1;  panLineDrawing   = false;
+    satDragIdx     = -1;  satLineDrawing   = false;
+    pitchDragIdx   = -1;  pitchLineDrawing = false;
     multiGainAtDragStart.clear();
     multiPanAtDragStart.clear();
     multiSatAtDragStart.clear();
+    multiPitchAtDragStart.clear();
     pushUndoIfChanged();
     updateCursor(e.position, e.mods.isAltDown());
 }

@@ -1,6 +1,6 @@
 #include "PluginEditor.h"
 
-static const juce::String kVersionLabel = "0.30";
+static const juce::String kVersionLabel = "0.38";
 
 //==============================================================================
 // Musical subdivision options — label shown in ComboBox, beats = snap step in beats
@@ -280,11 +280,13 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
     layerBox.addItem("GAIN", 1);
     layerBox.addItem("PAN", 2);
     layerBox.addItem("SAT", 3);
+    layerBox.addItem("PITCH", 4);
     layerBox.setSelectedId(1, juce::dontSendNotification);
     layerBox.onChange = [this] {
         int id = layerBox.getSelectedId();
         if      (id == 2) timeline.setEditMode(NodeTimeline::EditMode::Pan);
         else if (id == 3) timeline.setEditMode(NodeTimeline::EditMode::Sat);
+        else if (id == 4) timeline.setEditMode(NodeTimeline::EditMode::Pitch);
         else              timeline.setEditMode(NodeTimeline::EditMode::None);
     };
     addAndMakeVisible(layerBox);
@@ -332,16 +334,21 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
 
     //--- global INPUT / OUTPUT trim knobs (lilac = level).  Knob is in dB (±24,
     //    0 = unity); the processor stores the linear gain. ---
+    //--- IN/OUT are ±24 dB trims, but the very bottom of the travel is a true MUTE
+    //    (0 gain), not −24 dB — so "turned all the way down" is completely silent.
+    //    Using −24 as the minus-infinity point makes decibelsToGain(−24,−24)==0 and
+    //    gainToDecibels(0,−24)==−24 round-trip cleanly. ---
     auto setupGainKnob = [this](juce::Slider& s, float linearGain,
                                 std::function<void(float)> setter, const juce::String& tip)
     {
         s.setNormalisableRange(juce::NormalisableRange<double>(-24.0, 24.0, 0.1));
-        s.setValue(juce::Decibels::gainToDecibels(linearGain, -60.0f), juce::dontSendNotification);
+        s.setValue(juce::Decibels::gainToDecibels(linearGain, -24.0f), juce::dontSendNotification);
         s.setDoubleClickReturnValue(true, 0.0);
         s.setColour(juce::Slider::rotarySliderFillColourId, eg::col::lilac);
         s.setTextValueSuffix(" dB");
         s.setTooltip(tip);
-        s.onValueChange = [&s, setter] { setter(juce::Decibels::decibelsToGain((float)s.getValue())); };
+        s.onValueChange = [&s, setter]
+            { setter(juce::Decibels::decibelsToGain((float)s.getValue(), -24.0f)); };
         addAndMakeVisible(s);
     };
     setupGainKnob(inputSlider,  p.inputGain,
@@ -349,17 +356,17 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
                   "Input gain into the whole effect (also sets how hard saturation is driven)");
     setupGainKnob(outputSlider, p.outputGain,
                   [this](float g){ processorRef.outputGain = g; },
-                  "Output gain — final level after the whole chain");
+                  "Output gain - final level after the whole chain");
 
-    //--- analog timing jitter knob (disabled, future) ---
-    analogSlider.setRange(0.0, 1.0, 0.01);
-    analogSlider.setDoubleClickReturnValue(true, 0.0);
-    analogSlider.setValue(p.analogAmount, juce::dontSendNotification);
-    analogSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::lilac);
-    analogSlider.setEnabled(false);
-    analogSlider.setTooltip("Disabled until reverse timing is stabilized");
-    analogSlider.onValueChange = [this] { processorRef.analogAmount = (float)analogSlider.getValue(); };
-    addAndMakeVisible(analogSlider);
+    //--- pitch-shift GRAIN length knob (ms) — temporary control for ear-tuning the
+    //    pitch quality; live value drawn under the knob so it can be read back ---
+    grainSlider.setRange(15.0, 100.0, 1.0);
+    grainSlider.setValue(p.pitchGrainMs, juce::dontSendNotification);
+    grainSlider.setDoubleClickReturnValue(true, 30.0);
+    grainSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::lilacDeep);
+    grainSlider.setTooltip("Pitch-shift grain length (ms). Shorter = tighter but more warble; longer = smoother but more smear. Tune by ear and tell me the value.");
+    grainSlider.onValueChange = [this] { processorRef.pitchGrainMs = (float)grainSlider.getValue(); };
+    addAndMakeVisible(grainSlider);
 
     addAndMakeVisible(timeline);
     addAndMakeVisible(inspector);
@@ -383,13 +390,13 @@ void EchoGridEditor::timerCallback()
         if (std::abs((float)s.getValue() - v) > 0.001f)
             s.setValue(v, juce::dontSendNotification);
     };
-    syncf(analogSlider, processorRef.analogAmount);
+    syncf(grainSlider,  processorRef.pitchGrainMs);
     syncf(hpSlider,     processorRef.hpCutoffHz);
     syncf(lpSlider,     processorRef.lpCutoffHz);
     syncf(driveSlider,  processorRef.satDrive);
-    //--- gain knobs are in dB but the processor holds linear gain ---
+    //--- gain knobs are in dB but the processor holds linear gain (−24 dB = mute) ---
     auto syncGain = [](juce::Slider& s, float linear) {
-        float dB = juce::Decibels::gainToDecibels(linear, -60.0f);
+        float dB = juce::Decibels::gainToDecibels(linear, -24.0f);
         if (std::abs((float)s.getValue() - dB) > 0.01f)
             s.setValue(dB, juce::dontSendNotification);
     };
@@ -475,10 +482,16 @@ void EchoGridEditor::paint(juce::Graphics& g)
     knobLabel(driveSlider, "DRIVE");
     knobLabel(inputSlider,  "IN");
     knobLabel(outputSlider, "OUT");
-    g.setColour(eg::col::ink3);
+    //--- GRAIN knob: label + live ms value (so the tuned value can be read back) ---
+    g.setColour(eg::col::ink2);
     g.setFont(10.0f);
-    g.drawText("ANALOG", analogSlider.getX() - 10, analogSlider.getBottom() + 2,
-               analogSlider.getWidth() + 20, 12, juce::Justification::centred, false);
+    g.drawText("GRAIN", grainSlider.getX() - 10, grainSlider.getBottom() + 2,
+               grainSlider.getWidth() + 20, 12, juce::Justification::centred, false);
+    g.setColour(eg::col::ink3);
+    g.setFont(9.0f);
+    g.drawText(juce::String((int)std::round(processorRef.pitchGrainMs)) + " ms",
+               grainSlider.getX() - 10, grainSlider.getBottom() + 13,
+               grainSlider.getWidth() + 20, 11, juce::Justification::centred, false);
 
     //--- toggle labels (to the left of each pill) ---
     g.setColour(eg::col::ink);
@@ -541,7 +554,7 @@ void EchoGridEditor::resized()
     int ky2 = ky + ks + 24;
     int ks2 = 58;
     driveSlider.setBounds (innerX        + (colW - ks2) / 2, ky2, ks2, ks2);
-    analogSlider.setBounds(innerX + colW + (colW - 48)  / 2, ky2 + 4, 48, 48);
+    grainSlider.setBounds (innerX + colW + (colW - 48)  / 2, ky2 + 4, 48, 48);
 
     int ty = ky2 + ks2 + 30;
     const int pillW = 42, pillH = 24;

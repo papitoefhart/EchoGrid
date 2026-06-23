@@ -83,6 +83,51 @@ static RunResult runReverse(double sampleRate, int blockSize, float positionBeat
 }
 
 //==============================================================================
+// Drive the REAL processor with the dry muted and a single FORWARD tap pitched by
+// `semitones`.  Returns the output (channel 0) = the pitched echo only.
+//==============================================================================
+static std::vector<float> runForwardPitch(double sampleRate, int blockSize,
+                                          float positionBeats, float semitones,
+                                          long totalSamples,
+                                          const std::function<float(long)>& input)
+{
+    EchoGridProcessor proc;
+    proc.prepareToPlay(sampleRate, blockSize);
+    proc.dry.gain = 0.0f;                 // echo only
+    proc.gridLengthBeats = 4.0f;
+    proc.nodes.clear();
+    EchoNode n; n.positionBeats = positionBeats; n.gain = 1.0f; n.pan = 0.0f;
+    n.probability = 1.0f; n.saturation = 0.0f; n.active = true; n.reverse = false;
+    n.pitchSemitones = semitones;
+    proc.nodes.push_back(n);
+
+    MockPlayHead head; head.bpm_ = 120.0; head.sampleRate_ = sampleRate;
+    head.blockSize_ = blockSize; head.barBeats_ = 4.0; head.ppqPos_ = 0.0;
+    proc.setPlayHead(&head);
+
+    std::vector<float> out; out.reserve(totalSamples);
+    juce::AudioBuffer<float> buf(2, blockSize); juce::MidiBuffer midi;
+    long g = 0; const long nBlocks = (totalSamples + blockSize - 1) / blockSize;
+    for (long b = 0; b < nBlocks; ++b)
+    {
+        buf.clear();
+        for (int s = 0; s < blockSize; ++s) { float v = input(g + s); buf.setSample(0, s, v); buf.setSample(1, s, v); }
+        proc.processBlock(buf, midi); head.advanceBlock();
+        for (int s = 0; s < blockSize; ++s, ++g) out.push_back(buf.getSample(0, s));
+    }
+    return out;
+}
+
+//--- dominant frequency of a steady segment via zero-crossing rate ---
+static double zeroCrossFreq(const std::vector<float>& x, long from, long to, double sr)
+{
+    int crossings = 0;
+    for (long i = from + 1; i < to; ++i)
+        if ((x[i - 1] <= 0.0f) != (x[i] <= 0.0f)) ++crossings;
+    return (double)crossings * 0.5 * sr / (double)(to - from);
+}
+
+//==============================================================================
 int main()
 {
     const double sampleRate = 4000.0;
@@ -241,6 +286,33 @@ int main()
                       << (ok ? "  [OK]" : "  [FAIL]") << "\n";
             if (!ok) ++failures;
         }
+
+    //--------------------------------------------------------------------------
+    // TEST 5 — PITCH shift accuracy: a forward tap pitched by N semitones must
+    // play its echo at the input frequency × 2^(N/12).  Feed a steady sine, mute
+    // the dry, and measure the echo's frequency by its zero-crossing rate.
+    //--------------------------------------------------------------------------
+    std::cout << "\n--- Test 5: WSOLA pitch shift lands on the right frequency ---\n";
+    {
+        const double f0    = 200.0;                       // input sine (Hz)
+        const long   total = 12000;                       // 3 s at sr 4000
+        auto sine = [f0, sampleRate](long i) -> float
+            { return std::sin(2.0 * juce::MathConstants<double>::pi * f0 * (double)i / sampleRate); };
+
+        for (float semi : { 0.0f, 7.0f, 12.0f, -12.0f })
+        {
+            auto out = runForwardPitch(sampleRate, blockSize, 1.0f, semi, total, sine);
+            double measured = zeroCrossFreq(out, 8000, 11500, sampleRate);
+            double expect   = f0 * std::pow(2.0, semi / 12.0);
+            double errPct   = 100.0 * std::fabs(measured - expect) / expect;
+            bool   ok       = errPct < 6.0;
+            std::cout << "  " << (semi >= 0 ? "+" : "") << (int)semi << " st: measured "
+                      << (int)std::lround(measured) << " Hz (want " << (int)std::lround(expect)
+                      << ")  err " << (int)std::lround(errPct) << "%"
+                      << (ok ? "  [OK]" : "  [FAIL]") << "\n";
+            if (!ok) ++failures;
+        }
+    }
 
     std::cout << "\n=== " << (failures == 0 ? "ALL PASS" : "FAILURES")
               << " (" << failures << " failed) ===\n";

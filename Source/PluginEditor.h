@@ -78,7 +78,7 @@ private:
     juce::UndoManager  undoManager { 50 };    // max 50 undo steps; declared before timeline
     NodeTimeline       timeline;
     NodeInspector      inspector;
-    juce::Slider       analogSlider { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
+    juce::Slider       grainSlider { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
 
     //--- panel rectangles computed in resized(), painted in paint() ---
     juce::Rectangle<int> timelineArea, globalArea, inspectorArea;

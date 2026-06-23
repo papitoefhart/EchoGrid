@@ -131,6 +131,113 @@ struct TapeStage
 };
 
 //==============================================================================
+// PitchShifter — per-tap WSOLA (waveform-similarity overlap-add) pitch shifter.
+// Cleaner than naive granular: two Hann grains at 50% overlap, and at every grain
+// boundary the new grain's start is correlation-aligned to the outgoing grain so
+// the splice is phase-coherent (this is what kills the granular "buzz").  Reads
+// straight from the delay buffer, so it adds NO latency to the dry.
+//   • Pitch is EXACT by construction — each grain plays the buffer at the resample
+//     ratio; WSOLA only decides WHERE a grain starts, so it can't detune.
+//   • Timing state is shared across L/R so the stereo image holds.
+//   • The grain start is re-anchored to the tap delay every hop, so the echo never
+//     drifts off its beat.
+//==============================================================================
+struct PitchShifter
+{
+    //--- overlap factor: 4 = 75% overlap (smoother OLA than 50%/2-grain) ---
+    static constexpr int kOverlap = 4;
+
+    bool  primed = false;
+    int   phase  = 0;                  // 0..hop: output position within the current hop
+    float off[kOverlap] = { 0,0,0,0 }; // birth offsets of the K active grains (slot 0 = youngest)
+
+    void reset() { primed = false; phase = 0; for (auto& o : off) o = 0.0f; }
+
+    //--- fractional (linear) read, `off` samples back from the write head ---
+    static float readLerp(const juce::AudioBuffer<float>& buf, int ch, int wp, int bufSize, float off) noexcept
+    {
+        off = juce::jlimit(1.0f, (float)bufSize - 2.0f, off);
+        float rp = (float)wp - off;
+        if (rp < 0.0f) rp += (float)bufSize;
+        const int   i0 = (int)rp;
+        const int   i1 = (i0 + 1 < bufSize) ? i0 + 1 : 0;
+        const float fr = rp - (float)i0;
+        return buf.getSample(ch, i0) * (1.0f - fr) + buf.getSample(ch, i1) * fr;
+    }
+
+    //--- integer read for the (cheap, decimated) correlation search ---
+    static float readInt(const juce::AudioBuffer<float>& buf, int ch, int wp, int bufSize, float off) noexcept
+    {
+        int o   = juce::jlimit(1, bufSize - 2, (int)(off + 0.5f));
+        int idx = wp - o; if (idx < 0) idx += bufSize;
+        return buf.getSample(ch, idx);
+    }
+
+    //--- one output (stereo) sample.  N = grain length (samples); search = WSOLA
+    //    half-range; corrLen = correlation window.  Advances the shifter state. ---
+    void process(const juce::AudioBuffer<float>& buf, int wp, int bufSize,
+                 float baseOffset, float ratio, int N, int search, int corrLen,
+                 bool stereo, float& outL, float& outR) noexcept
+    {
+        const int   hop   = juce::jmax(1, N / kOverlap);
+        const float oneR  = 1.0f - ratio;
+        const float twoPi = juce::MathConstants<float>::twoPi;
+        const float invN  = 1.0f / (float)N;
+
+        //--- nominal birth offset: centre the grain so the AVERAGE delay stays at
+        //    the tap delay (a grain plays content forward at `ratio` over N samples) ---
+        const float nominal = baseOffset + (ratio - 1.0f) * (float)N * 0.5f;
+
+        if (!primed) { for (auto& o : off) o = nominal; phase = 0; primed = true; }
+
+        //--- sum the K overlapping Hann grains.  Slot k has age phase + k*hop;
+        //    slot 0 is youngest (fading in), slot K-1 oldest (fading out).  Hann at
+        //    this overlap is constant-overlap-add = K/2, so divide back to unity. ---
+        float accL = 0.0f, accR = 0.0f;
+        for (int k = 0; k < kOverlap; ++k)
+        {
+            const float age = (float)(phase + k * hop);
+            const float w   = 0.5f * (1.0f - std::cos(twoPi * age * invN));
+            const float oe  = off[k] + oneR * age;
+            accL += w * readLerp(buf, 0, wp, bufSize, oe);
+            if (stereo) accR += w * readLerp(buf, 1, wp, bufSize, oe);
+        }
+        const float norm = 2.0f / (float)kOverlap;
+        outL = accL * norm;
+        outR = stereo ? accR * norm : outL;
+
+        if (++phase >= hop)
+        {
+            phase = 0;
+            //--- retire the oldest grain, shift the rest down a slot ---
+            for (int k = kOverlap - 1; k >= 1; --k) off[k] = off[k - 1];
+
+            //--- WSOLA: choose the new grain start (near nominal, so the delay is
+            //    held) that best correlates with the previous grain's content at the
+            //    overlap → a phase-coherent splice instead of a buzzy one ---
+            const float prevAnchor = off[1] + oneR * (float)hop;
+            const int   cl    = juce::jmax(8, juce::jmin(corrLen, N - hop));
+            const int   kStep = 4, cStep = 3;
+            float bestScore = -1.0e30f, bestOff = nominal;
+            for (int d = -search; d <= search; d += cStep)
+            {
+                const float cand = nominal + (float)d;
+                float dot = 0.0f, eng = 0.0f;
+                for (int k = 0; k < cl; k += kStep)
+                {
+                    const float a = readInt(buf, 0, wp, bufSize, cand       + oneR * (float)k);
+                    const float b = readInt(buf, 0, wp, bufSize, prevAnchor + oneR * (float)k);
+                    dot += a * b;  eng += a * a;
+                }
+                const float score = dot / std::sqrt(eng + 1.0e-9f);  // normalised
+                if (score > bestScore) { bestScore = score; bestOff = cand; }
+            }
+            off[0] = bestOff;
+        }
+    }
+};
+
+//==============================================================================
 struct DryNode
 {
     float gain = 1.0f;
@@ -164,14 +271,19 @@ struct EchoNode
     bool  reverseLock   = true;   // true = attack stays on the beat (length ≤ ½ tap);
                                   // false = length runs free (attack can drift late)
 
+    //--- per-tap pitch shift in semitones (0 = unison).  Drawn on the PITCH layer;
+    //    forward taps only.  Snapped to whole semitones in the UI. ---
+    float pitchSemitones = 0.0f;
+
     bool operator==(const EchoNode& o) const
     {
-        return std::memcmp(&positionBeats, &o.positionBeats, sizeof(float)) == 0
-            && std::memcmp(&gain,          &o.gain,          sizeof(float)) == 0
-            && std::memcmp(&pan,           &o.pan,           sizeof(float)) == 0
-            && std::memcmp(&probability,   &o.probability,   sizeof(float)) == 0
-            && std::memcmp(&saturation,    &o.saturation,    sizeof(float)) == 0
-            && std::memcmp(&reverseLength, &o.reverseLength, sizeof(float)) == 0
+        return std::memcmp(&positionBeats,  &o.positionBeats,  sizeof(float)) == 0
+            && std::memcmp(&gain,           &o.gain,           sizeof(float)) == 0
+            && std::memcmp(&pan,            &o.pan,            sizeof(float)) == 0
+            && std::memcmp(&probability,    &o.probability,    sizeof(float)) == 0
+            && std::memcmp(&saturation,     &o.saturation,     sizeof(float)) == 0
+            && std::memcmp(&reverseLength,  &o.reverseLength,  sizeof(float)) == 0
+            && std::memcmp(&pitchSemitones, &o.pitchSemitones, sizeof(float)) == 0
             && active == o.active && reverse == o.reverse
             && reverseLock == o.reverseLock;
     }
@@ -234,6 +346,12 @@ public:
     float inputGain  = 1.0f;
     float outputGain = 1.0f;
 
+    //--- per-tap WSOLA pitch-shift frame length in ms (editor-writable, audio-read).
+    //    Ear-tuned default 30 ms.  SHORTER = smoother (the OLA repeat/skip happens
+    //    faster and blends); LONGER = choppier (slower repeat, audible roughness).
+    //    Too short eventually can't lock onto low notes. ---
+    float pitchGrainMs = 30.0f;
+
 private:
     //--- per-node DSP state (audio thread only).  Reverse needs no per-node
     //    state any more: it's a stateless function of the transport position. ---
@@ -242,7 +360,8 @@ private:
         bool      fired        = true;
         float     gainEnvelope = 1.0f;
         float     timingJitter = 0.0f;
-        TapeStage tape;          // per-tap SAT: same tape stage as the global drive
+        TapeStage    tape;       // per-tap SAT: same tape stage as the global drive
+        PitchShifter pitch;      // per-tap WSOLA pitch shifter (forward taps only)
     };
 
     void rerollNodes();
