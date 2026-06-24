@@ -60,6 +60,25 @@ private:
 };
 
 //==============================================================================
+// GuideTab — a "guide card" tab that clings to an edge of the timeline panel and
+// merges into it.  attachTop=true → rounded top corners / flat bottom (hangs above
+// the panel, overlapping its top edge); attachTop=false → rounded bottom / flat
+// top (hangs below, overlapping the bottom edge).
+// Selected = lilac fill + white text; unselected = white card + border + grey text.
+//==============================================================================
+class GuideTab : public juce::Button
+{
+public:
+    GuideTab() : juce::Button("") {}
+    void setAttachTop(bool t)   { attachTop = t; }
+    void setFontSize(float s)   { fontSize = s; }
+    void paintButton(juce::Graphics&, bool mouseOver, bool isDown) override;
+private:
+    bool  attachTop = true;
+    float fontSize  = 12.0f;
+};
+
+//==============================================================================
 class EchoGridEditor : public juce::AudioProcessorEditor, private juce::Timer
 {
 public:
@@ -72,6 +91,7 @@ public:
 private:
     void timerCallback() override;
     void updateGridButtons();
+    void rebuildShadowCache();   // pre-render static drop-shadows into shadowCache
 
     EchoGridProcessor& processorRef;
     EchoGridLAF        egLAF;                 // declared first so children outlive it last
@@ -83,14 +103,32 @@ private:
     //--- panel rectangles computed in resized(), painted in paint() ---
     juce::Rectangle<int> timelineArea, globalArea, inspectorArea;
 
-    //--- grid length buttons: 1 2 4 8 beats ---
-    juce::TextButton beatBtns[4];
+    //--- static drop-shadows pre-rendered once (in resized()) and blitted in paint()
+    //    instead of recomputing ~40 Gaussian blurs every frame ---
+    juce::Image shadowCache;
+
+    //--- editor-timer change detection so we only repaint on real (e.g. host-load)
+    //    changes instead of a blanket 10x/sec repaint ---
+    float lastGrainMs  = -1.0f;
+    float lastGridLen  = -1.0f;
+    float lastSnapStep = -1.0f;
+
+    //--- grid length tabs: 1 2 4 8 beats — guide cards on the timeline's top-right edge ---
+    GuideTab beatBtns[4];
     static constexpr int beatOptions[4] = { 1, 2, 4, 8 };
 
-    //--- subdivision ComboBox: musical grid values including triplets ---
-    juce::ComboBox   subdivBox;
+    //--- subdivision tabs: musical grid values incl. triplets — guide cards on the
+    //    timeline's bottom-left edge (replaced the dropdown).  Count must match
+    //    kNumSubdivs in PluginEditor.cpp. ---
+    static constexpr int kNumSubdivs = 7;
+    GuideTab subdivTabs[kNumSubdivs];
 
-    juce::ComboBox    layerBox;   // selects automation overlay: gain / pan / sat
+    //--- overlay layer selector: GAIN / PAN / SAT / PITCH guide-card tabs on the
+    //    timeline's top-left edge — purple when selected, white otherwise ---
+    static constexpr int kNumLayers = 4;
+    GuideTab          layerTabs[kNumLayers];
+    void setLayer(int index);
+
     UndoArrowButton   undoBtn    { false };  // ↺ undo
     UndoArrowButton   redoBtn    { true  };  // ↻ redo
 

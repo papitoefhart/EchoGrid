@@ -20,6 +20,9 @@ public:
     const std::vector<int>& getMultiSelection() const { return multiSelection; }
     void clearSelection() { multiSelection.clear(); selectedIndex = -1; repaint(); }
 
+    //--- dev/test only: force a selection for the offscreen render harness ---
+    void selectForRender(int i) { multiSelection.assign(1, i); selectedIndex = i; repaint(); }
+
     //--- overlay edit mode ---
     enum class EditMode { None, Pan, Sat, Pitch };
     void setEditMode(EditMode m) { editMode = m; repaint(); }

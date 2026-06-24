@@ -1,9 +1,10 @@
 #include "PluginEditor.h"
 
-static const juce::String kVersionLabel = "0.38";
+static const juce::String kVersionLabel = "0.51";
 
 //==============================================================================
-// Musical subdivision options — label shown in ComboBox, beats = snap step in beats
+// Musical subdivision options — label shown on the tab, beats = snap step in beats.
+// Count must match EchoGridEditor::kNumSubdivs.
 //==============================================================================
 struct SubdivOption { const char* label; float beats; };
 static const SubdivOption kSubdivs[] = {
@@ -14,13 +15,7 @@ static const SubdivOption kSubdivs[] = {
     { "1/16",   0.25f       },
     { "1/16T",  1.0f/6.0f  },  // sixteenth triplet
     { "1/32",   0.125f      },
-    { "1/32T",  1.0f/12.0f },
-    { "1/64",   0.0625f     },
-    { "1/64T",  1.0f/24.0f },
-    { "1/128",  0.03125f    },
-    { "1/128T", 1.0f/48.0f },
 };
-static constexpr int kNumSubdivs = 12;
 
 //==============================================================================
 // EchoGridLAF — light "modern/calm" look
@@ -219,13 +214,75 @@ void UndoArrowButton::paintButton(juce::Graphics& g, bool mouseOver, bool isDown
 }
 
 //==============================================================================
-// Helpers
+// GuideTab — guide-card tab merging into an edge of the timeline panel
 //==============================================================================
-static void styleBeatBtn(juce::TextButton& b)
+void GuideTab::paintButton(juce::Graphics& g, bool mouseOver, bool /*isDown*/)
 {
-    b.setColour(juce::TextButton::buttonOnColourId, eg::col::lilac);
-    b.setColour(juce::TextButton::textColourOnId,   eg::col::ink);
-    b.setColour(juce::TextButton::textColourOffId,  eg::col::ink2);
+    auto r = getLocalBounds().toFloat();
+    const float topR  = 8.0f;   // convex corners on the free edge
+    const float footR = 5.0f;   // concave flare where the tab flows into the panel
+    const bool  on    = getToggleState();
+
+    //--- Tab outline as an OPEN path running along the three free edges only.  The
+    //    panel-side edge is left open (filled by the implicit close, stroked by
+    //    nothing) so there's no seam, and the base corners flare out with a concave
+    //    curve so the tab melts smoothly into the panel surface. ---
+    const float xL = r.getX(), xR = r.getRight();
+    juce::Path p;
+
+    if (attachTop)
+    {
+        const float yTop = r.getY(), yPan = r.getBottom();   // panel edge = bottom
+        p.startNewSubPath(xL, yPan);
+        p.quadraticTo(xL + footR, yPan, xL + footR, yPan - footR);          // concave foot
+        p.lineTo(xL + footR, yTop + topR);
+        p.quadraticTo(xL + footR, yTop, xL + footR + topR, yTop);          // top-left
+        p.lineTo(xR - footR - topR, yTop);
+        p.quadraticTo(xR - footR, yTop, xR - footR, yTop + topR);          // top-right
+        p.lineTo(xR - footR, yPan - footR);
+        p.quadraticTo(xR - footR, yPan, xR, yPan);                         // concave foot
+    }
+    else
+    {
+        const float yBot = r.getBottom(), yPan = r.getY();   // panel edge = top
+        p.startNewSubPath(xL, yPan);
+        p.quadraticTo(xL + footR, yPan, xL + footR, yPan + footR);
+        p.lineTo(xL + footR, yBot - topR);
+        p.quadraticTo(xL + footR, yBot, xL + footR + topR, yBot);
+        p.lineTo(xR - footR - topR, yBot);
+        p.quadraticTo(xR - footR, yBot, xR - footR, yBot - topR);
+        p.lineTo(xR - footR, yPan + footR);
+        p.quadraticTo(xR - footR, yPan, xR, yPan);
+    }
+
+    if (on)
+    {
+        //--- selected: lilac that fades to the panel's white near the merged edge, so
+        //    the purple stops short of the panel instead of meeting it as a hard line ---
+        const float fade = 8.0f;
+        auto grad = attachTop
+            ? juce::ColourGradient(eg::col::lilac,   r.getCentreX(), r.getBottom() - fade,
+                                   eg::col::surface, r.getCentreX(), r.getBottom(), false)
+            : juce::ColourGradient(eg::col::lilac,   r.getCentreX(), r.getY() + fade,
+                                   eg::col::surface, r.getCentreX(), r.getY(), false);
+        g.setGradientFill(grad);
+        g.fillPath(p);
+    }
+    else
+    {
+        //--- unselected fill matches the timeline surface so the join is invisible ---
+        g.setColour(mouseOver ? eg::col::lilacSoft.withAlpha(0.45f) : eg::col::surface);
+        g.fillPath(p);   // implicitly closed straight along the panel edge
+        g.setColour(eg::col::line2);
+        g.strokePath(p, juce::PathStrokeType(1.0f));   // open path → no line on the panel edge
+    }
+
+    g.setColour(on ? juce::Colours::white : eg::col::ink2);
+    g.setFont(juce::Font(fontSize, on ? juce::Font::bold : juce::Font::plain));
+    //--- text in the body (clear of the feet and the merged edge) ---
+    auto textArea = getLocalBounds().reduced((int)footR, 0);
+    textArea = attachTop ? textArea.withTrimmedBottom(3) : textArea.withTrimmedTop(3);
+    g.drawText(getButtonText(), textArea, juce::Justification::centred, false);
 }
 
 //==============================================================================
@@ -234,13 +291,13 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
 {
     setLookAndFeel(&egLAF);
 
-    //--- beat length buttons ---
+    //--- beat length tabs (guide cards, top-right of the timeline) ---
     const juce::String beatLabels[4] = { "1", "2", "4", "8" };
     for (int i = 0; i < 4; ++i)
     {
         beatBtns[i].setButtonText(beatLabels[i]);
         beatBtns[i].setClickingTogglesState(false);
-        styleBeatBtn(beatBtns[i]);
+        beatBtns[i].setAttachTop(true);
         beatBtns[i].onClick = [this, i]
         {
             int newLen = beatOptions[i];
@@ -259,37 +316,35 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
         addAndMakeVisible(beatBtns[i]);
     }
 
-    //--- subdivision ComboBox ---
+    //--- subdivision tabs (guide cards, bottom-left of the timeline; replaced the
+    //    dropdown).  attachTop=false so they hang below the panel's bottom edge ---
     for (int i = 0; i < kNumSubdivs; ++i)
-        subdivBox.addItem(kSubdivs[i].label, i + 1);
-    subdivBox.setSelectedId(5, juce::dontSendNotification);  // 1/16 default
-    subdivBox.onChange = [this]
     {
-        int id = subdivBox.getSelectedId();
-        if (id >= 1 && id <= kNumSubdivs)
+        subdivTabs[i].setButtonText(kSubdivs[i].label);
+        subdivTabs[i].setClickingTogglesState(false);
+        subdivTabs[i].setAttachTop(false);
+        subdivTabs[i].setFontSize(9.5f);
+        subdivTabs[i].onClick = [this, i]
         {
             timeline.captureSnapshot();
-            processorRef.snapStepBeats = kSubdivs[id - 1].beats;
+            processorRef.snapStepBeats = kSubdivs[i].beats;
             timeline.pushUndoIfChanged();
             updateGridButtons();
-        }
-    };
-    addAndMakeVisible(subdivBox);
+        };
+        addAndMakeVisible(subdivTabs[i]);
+    }
 
-    //--- layer selector ---
-    layerBox.addItem("GAIN", 1);
-    layerBox.addItem("PAN", 2);
-    layerBox.addItem("SAT", 3);
-    layerBox.addItem("PITCH", 4);
-    layerBox.setSelectedId(1, juce::dontSendNotification);
-    layerBox.onChange = [this] {
-        int id = layerBox.getSelectedId();
-        if      (id == 2) timeline.setEditMode(NodeTimeline::EditMode::Pan);
-        else if (id == 3) timeline.setEditMode(NodeTimeline::EditMode::Sat);
-        else if (id == 4) timeline.setEditMode(NodeTimeline::EditMode::Pitch);
-        else              timeline.setEditMode(NodeTimeline::EditMode::None);
-    };
-    addAndMakeVisible(layerBox);
+    //--- layer selector: GAIN / PAN / SAT / PITCH tab cards (purple = selected,
+    //    white = not), replacing the old dropdown ---
+    const juce::String layerLabels[kNumLayers] = { "GAIN", "PAN", "SAT", "PITCH" };
+    for (int i = 0; i < kNumLayers; ++i)
+    {
+        layerTabs[i].setButtonText(layerLabels[i]);
+        layerTabs[i].setClickingTogglesState(false);
+        layerTabs[i].onClick = [this, i] { setLayer(i); };
+        addAndMakeVisible(layerTabs[i]);
+    }
+    setLayer(0);   // GAIN selected by default
 
     //--- undo / redo ---
     undoBtn.onClick = [this] { undoManager.undo(); timeline.repaint(); };
@@ -363,13 +418,19 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
     grainSlider.setRange(15.0, 100.0, 1.0);
     grainSlider.setValue(p.pitchGrainMs, juce::dontSendNotification);
     grainSlider.setDoubleClickReturnValue(true, 30.0);
-    grainSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::lilacDeep);
+    grainSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::green);
     grainSlider.setTooltip("Pitch-shift grain length (ms). Shorter = tighter but more warble; longer = smoother but more smear. Tune by ear and tell me the value.");
-    grainSlider.onValueChange = [this] { processorRef.pitchGrainMs = (float)grainSlider.getValue(); };
+    grainSlider.onValueChange = [this] { processorRef.pitchGrainMs = (float)grainSlider.getValue(); repaint(); };
     addAndMakeVisible(grainSlider);
 
     addAndMakeVisible(timeline);
     addAndMakeVisible(inspector);
+    //--- all guide-card tabs must paint on top of the timeline panel's border so
+    //    they merge into it ---
+    for (auto& t : layerTabs)  t.toFront(false);
+    for (auto& t : beatBtns)   t.toFront(false);
+    for (auto& t : subdivTabs) t.toFront(false);
+
     setResizable(true, true);
     setResizeLimits(860, 560, 1600, 900);   // min height fits the IN/OUT row in the global panel
     setSize(1040, 600);
@@ -406,6 +467,23 @@ void EchoGridEditor::timerCallback()
     satGlobalBtn.setToggleState(processorRef.satGlobalOverride,  juce::dontSendNotification);
 
     updateGridButtons();
+
+    //--- repaint only on real changes (e.g. host loaded a preset).  The editor's own
+    //    paint draws the live GRAIN ms readout; the timeline draws the grid.  This used
+    //    to repaint the WHOLE editor 10x/sec unconditionally (re-rendering ~40 drop
+    //    shadows each time) — the main cause of the sluggish, laggy feel. ---
+    if (std::abs(lastGrainMs - processorRef.pitchGrainMs) > 1.0e-6f)
+    {
+        lastGrainMs = processorRef.pitchGrainMs;
+        repaint();
+    }
+    if (std::abs(lastGridLen  - processorRef.gridLengthBeats) > 1.0e-6f
+     || std::abs(lastSnapStep - processorRef.snapStepBeats)   > 1.0e-6f)
+    {
+        lastGridLen  = processorRef.gridLengthBeats;
+        lastSnapStep = processorRef.snapStepBeats;
+        timeline.repaint();
+    }
 }
 
 void EchoGridEditor::updateGridButtons()
@@ -416,12 +494,24 @@ void EchoGridEditor::updateGridButtons()
 
     float cur = processorRef.snapStepBeats;
     for (int i = 0; i < kNumSubdivs; ++i)
-        if (std::abs(kSubdivs[i].beats - cur) < 0.0001f)
-        {
-            subdivBox.setSelectedId(i + 1, juce::dontSendNotification);
-            break;
-        }
-    repaint();
+        subdivTabs[i].setToggleState(std::abs(kSubdivs[i].beats - cur) < 0.0001f,
+                                     juce::dontSendNotification);
+    //--- setToggleState already repaints any tab whose state changed; no editor-wide
+    //    repaint needed here (callers that change the grid repaint the timeline). ---
+}
+
+//--- select an overlay layer (0 GAIN / 1 PAN / 2 SAT / 3 PITCH): highlight its
+//    tab card and switch the timeline's edit mode ---
+void EchoGridEditor::setLayer(int index)
+{
+    for (int i = 0; i < kNumLayers; ++i)
+        layerTabs[i].setToggleState(i == index, juce::dontSendNotification);
+
+    auto mode = index == 1 ? NodeTimeline::EditMode::Pan
+              : index == 2 ? NodeTimeline::EditMode::Sat
+              : index == 3 ? NodeTimeline::EditMode::Pitch
+                           : NodeTimeline::EditMode::None;
+    timeline.setEditMode(mode);
 }
 
 //==============================================================================
@@ -444,31 +534,35 @@ void EchoGridEditor::paint(juce::Graphics& g)
     g.drawText("MULTI-TAP DELAY", (int)bx, 41, 130, 10, juce::Justification::left, false);
     g.drawText("v" + kVersionLabel, (int)bx, 2, 60, 10, juce::Justification::left, false);
 
-    //--- top-bar section labels ---
-    g.setColour(eg::col::ink3);
-    g.setFont(8.5f);
-    auto sectionLabel = [&](juce::Component& c, const juce::String& t) {
-        g.drawText(t, c.getX(), c.getY() - 13, 80, 10, juce::Justification::left, false);
-    };
-    sectionLabel(beatBtns[0], "BEATS");
-    sectionLabel(subdivBox,   "GRID");
-    sectionLabel(layerBox,    "LAYER");
+    //--- all static drop-shadows (timeline, inspector, guide-card tabs, undo/redo
+    //    arrows, global panel) are pre-rendered once into shadowCache in resized() and
+    //    blitted here.  Drawing them live was ~40 Gaussian blurs PER paint — and the
+    //    editor used to repaint 10x/sec, which is what made clicks feel laggy. ---
+    if (shadowCache.isValid())
+        g.drawImageAt(shadowCache, 0, 0);
 
-    //--- offset second-colour shadow behind the timeline & inspector child panels ---
-    auto shadowFor = [&](juce::Rectangle<int> a) {
-        g.setColour(eg::col::shadow);
-        g.fillRoundedRectangle(a.toFloat().translated(7.0f, 8.0f), 16.0f);
-    };
-    shadowFor(timelineArea);
-    shadowFor(inspectorArea);
+    //--- right Global panel surface (its soft shadow is baked into shadowCache above;
+    //    the knobs/pills are child controls) ---
+    g.setColour(eg::col::panel);
+    g.fillRoundedRectangle(globalArea.toFloat(), eg::kPanelRadius);
+    g.setColour(eg::col::line);
+    g.drawRoundedRectangle(globalArea.toFloat(), eg::kPanelRadius, 1.0f);
 
-    //--- right Global panel (painted here; its knobs/pills are child controls) ---
-    eg::drawSoftPanel(g, globalArea.toFloat(), 16.0f);
+    //--- GLOBAL section header: icon chip + uppercase label ---
+    {
+        juce::Rectangle<float> ic((float)globalArea.getX() + 16.0f,
+                                  (float)globalArea.getY() + 12.0f, 22.0f, 22.0f);
+        g.setColour(eg::col::iconBg);
+        g.fillRoundedRectangle(ic, 7.0f);
+        g.setColour(eg::col::line);
+        g.drawRoundedRectangle(ic, 7.0f, 1.0f);
+        eg::drawSlidersIcon(g, ic.reduced(5.5f), eg::col::lilacDeep);
 
-    g.setColour(eg::col::ink3);
-    g.setFont(9.0f);
-    g.drawText("GLOBAL", globalArea.getX() + 16, globalArea.getY() + 12, 120, 12,
-               juce::Justification::left, false);
+        g.setColour(eg::col::ink2);
+        g.setFont(juce::Font(10.5f, juce::Font::bold));
+        g.drawText("GLOBAL", (int)ic.getRight() + 8, (int)ic.getY(), 120, 22,
+                   juce::Justification::centredLeft, false);
+    }
 
     //--- knob labels ---
     auto knobLabel = [&](juce::Slider& s, const juce::String& t) {
@@ -514,7 +608,7 @@ void EchoGridEditor::resized()
     auto topBar = area.removeFromTop(54);
     area.removeFromTop(12);
     inspectorArea = area.removeFromBottom(92);
-    area.removeFromBottom(12);
+    area.removeFromBottom(36);   // gap holds the subdivision tabs hanging below the timeline
 
     auto body = area;
     globalArea = body.removeFromRight(212);
@@ -524,21 +618,48 @@ void EchoGridEditor::resized()
     timeline.setBounds(timelineArea);
     inspector.setBounds(inspectorArea);
 
-    //--- top bar ---
+    //--- top bar: undo / redo, left-aligned with the GLOBAL panel (kept as separate
+    //    floating buttons — NOT merged into the panel like the tabs) ---
     const int rowY = topBar.getY() + 20;
     const int h    = 26;
-    int x = topBar.getX() + 150;
+    undoBtn.setBounds(globalArea.getX(),      rowY, 30, h);
+    redoBtn.setBounds(globalArea.getX() + 34, rowY, 30, h);
 
-    const int bw = 28;
-    for (int i = 0; i < 4; ++i)
-        beatBtns[i].setBounds(x + i * (bw + 3), rowY, bw, h);
-    x += 4 * (bw + 3) + 18;
+    //==========================================================================
+    // Guide-card tabs clinging to the timeline panel edges.  Each group overlaps
+    // the panel border by 2px (and is toFront'd) so it merges into the card; the
+    // gaps are wide enough that the tabs' concave feet don't collide.  Every group
+    // sits in empty space — never over another panel, slider or tap.
+    //==========================================================================
+    const int tabH = 26;
 
-    subdivBox.setBounds(x, rowY, 78, h);  x += 78 + 18;
-    layerBox.setBounds(x, rowY, 88, h);
+    //--- LAYER (top-left): GAIN / PAN / SAT / PITCH ---
+    {
+        const int w = 52, gap = 6;
+        int tx = timelineArea.getX() + 22;
+        int ty = timelineArea.getY() + 2 - tabH;       // hangs above, 2px into the top edge
+        for (int i = 0; i < kNumLayers; ++i)
+            layerTabs[i].setBounds(tx + i * (w + gap), ty, w, tabH);
+    }
 
-    redoBtn.setBounds(topBar.getRight() - 30,       rowY, 30, h);
-    undoBtn.setBounds(topBar.getRight() - 30 - 34,  rowY, 30, h);
+    //--- BEATS (top-right): 1 / 2 / 4 / 8 ---
+    {
+        const int w = 36, gap = 6;
+        const int groupW = 4 * w + 3 * gap;
+        int tx = timelineArea.getRight() - 22 - groupW;
+        int ty = timelineArea.getY() + 2 - tabH;
+        for (int i = 0; i < 4; ++i)
+            beatBtns[i].setBounds(tx + i * (w + gap), ty, w, tabH);
+    }
+
+    //--- GRID subdivision (bottom-left): 1/4 … 1/128T, hanging below the panel ---
+    {
+        const int w = 44, gap = 4;
+        int tx = timelineArea.getX() + 22;
+        int ty = timelineArea.getBottom() - 2;         // hangs below, 2px into the bottom edge
+        for (int i = 0; i < kNumSubdivs; ++i)
+            subdivTabs[i].setBounds(tx + i * (w + gap), ty, w, tabH);
+    }
 
     //--- global panel internals ---
     const int gx     = globalArea.getX();
@@ -566,4 +687,39 @@ void EchoGridEditor::resized()
     int ks3 = 50;
     inputSlider.setBounds (innerX        + (colW - ks3) / 2, ky3, ks3, ks3);
     outputSlider.setBounds(innerX + colW + (colW - ks3) / 2, ky3, ks3, ks3);
+
+    //--- positions are final → (re)bake the static drop-shadows used by paint() ---
+    rebuildShadowCache();
+}
+
+//==============================================================================
+// Pre-render every static drop-shadow into shadowCache once, so paint() can blit
+// it instead of recomputing ~40 Gaussian blurs each frame.  Rebuilt only on resize.
+//==============================================================================
+void EchoGridEditor::rebuildShadowCache()
+{
+    const int w = getWidth(), h = getHeight();
+    if (w <= 0 || h <= 0) { shadowCache = {}; return; }
+
+    shadowCache = juce::Image(juce::Image::ARGB, w, h, true);
+    juce::Graphics sg(shadowCache);
+
+    //--- panel shadows (timeline, inspector, global) ---
+    eg::drawSoftShadow(sg, timelineArea.toFloat());
+    eg::drawSoftShadow(sg, inspectorArea.toFloat());
+    eg::drawSoftShadow(sg, globalArea.toFloat());
+
+    //--- smaller shadows behind the guide-card tabs + undo/redo arrows ---
+    auto softShadow = [&](juce::Rectangle<int> b)
+    {
+        juce::Path pth;
+        pth.addRoundedRectangle(b.toFloat(), 8.0f);
+        juce::DropShadow(juce::Colour(0x336a4f86), 12, { 0, 4 }).drawForPath(sg, pth);
+        juce::DropShadow(juce::Colour(0x22473159),  5, { 0, 2 }).drawForPath(sg, pth);
+    };
+    for (auto& t : layerTabs)  softShadow(t.getBounds());
+    for (auto& t : beatBtns)   softShadow(t.getBounds());
+    for (auto& t : subdivTabs) softShadow(t.getBounds());
+    softShadow(undoBtn.getBounds());
+    softShadow(redoBtn.getBounds());
 }

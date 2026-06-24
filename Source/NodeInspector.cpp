@@ -17,6 +17,12 @@ static void styleButton(juce::TextButton& b)
     b.setColour(juce::TextButton::textColourOnId,   eg::col::ink);
 }
 
+//--- cheap FNV-1a folding to detect changes to what the UI shows, so the 30 Hz
+//    timer only repaints when something actually moved ---
+static inline void mixBits(juce::uint64& h, juce::uint32 b) noexcept { h = (h ^ b) * 1099511628211ull; }
+static inline void mixF(juce::uint64& h, float f) noexcept { juce::uint32 b; std::memcpy(&b, &f, sizeof(b)); mixBits(h, b); }
+static inline void mixI(juce::uint64& h, int v)   noexcept { mixBits(h, (juce::uint32)v); }
+
 //--- IN TIME / FREE reverse-timing toggle: DISABLED in the UI for now (it added no
 //    clear musical benefit).  The toggle, its DSP (the FREE mode in PluginProcessor)
 //    and the reverseLock node field are all kept intact — flip this flag back to
@@ -120,6 +126,85 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
     };
     addAndMakeVisible(panSlider);
 
+    //--- saturation knob (0..1): per-tap tape grit (rose) ---
+    satSlider.setRange(0.0, 1.0, 0.01);
+    satSlider.setDoubleClickReturnValue(true, 0.0);
+    styleKnob(satSlider);
+    satSlider.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xffe07aa6));
+    satSlider.onDragStart = [this]
+    {
+        satDragging   = true;
+        timeline.captureSnapshot();
+        satRefAtStart = (float)satSlider.getValue();
+        satAtDragStart.clear();
+        for (int i : timeline.getMultiSelection())
+            if (i >= 0 && i < (int)processor.nodes.size())
+                satAtDragStart.push_back(processor.nodes[i].saturation);
+    };
+    satSlider.onDragEnd = [this] { satDragging = false; timeline.pushUndoIfChanged(); };
+    satSlider.onValueChange = [this]
+    {
+        if (syncing) return;
+        float val = (float)satSlider.getValue();
+        int   idx = timeline.getSelectedIndex();
+        const auto& sel = timeline.getMultiSelection();
+        const juce::ScopedLock sl(processor.getCallbackLock());
+        if (sel.size() <= 1)
+        {
+            if (idx >= 0 && idx < (int)processor.nodes.size())
+                processor.nodes[idx].saturation = val;
+        }
+        else
+        {
+            float delta = val - satRefAtStart;
+            for (int k = 0; k < (int)std::min(sel.size(), satAtDragStart.size()); ++k)
+                if (sel[k] >= 0 && sel[k] < (int)processor.nodes.size())
+                    processor.nodes[sel[k]].saturation = juce::jlimit(0.0f, 1.0f, satAtDragStart[k] + delta);
+        }
+        timeline.repaint();
+    };
+    addAndMakeVisible(satSlider);
+
+    //--- pitch knob (±12 semitones, whole-step snapped) ---
+    pitchSlider.setRange(-12.0, 12.0, 1.0);
+    pitchSlider.setDoubleClickReturnValue(true, 0.0);
+    styleKnob(pitchSlider);
+    pitchSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::green);
+    pitchSlider.onDragStart = [this]
+    {
+        pitchDragging   = true;
+        timeline.captureSnapshot();
+        pitchRefAtStart = (float)pitchSlider.getValue();
+        pitchAtDragStart.clear();
+        for (int i : timeline.getMultiSelection())
+            if (i >= 0 && i < (int)processor.nodes.size())
+                pitchAtDragStart.push_back(processor.nodes[i].pitchSemitones);
+    };
+    pitchSlider.onDragEnd = [this] { pitchDragging = false; timeline.pushUndoIfChanged(); };
+    pitchSlider.onValueChange = [this]
+    {
+        if (syncing) return;
+        float val = (float)pitchSlider.getValue();
+        int   idx = timeline.getSelectedIndex();
+        const auto& sel = timeline.getMultiSelection();
+        const juce::ScopedLock sl(processor.getCallbackLock());
+        if (sel.size() <= 1)
+        {
+            if (idx >= 0 && idx < (int)processor.nodes.size())
+                processor.nodes[idx].pitchSemitones = val;
+        }
+        else
+        {
+            float delta = val - pitchRefAtStart;
+            for (int k = 0; k < (int)std::min(sel.size(), pitchAtDragStart.size()); ++k)
+                if (sel[k] >= 0 && sel[k] < (int)processor.nodes.size())
+                    processor.nodes[sel[k]].pitchSemitones =
+                        juce::jlimit(-12.0f, 12.0f, std::round(pitchAtDragStart[k] + delta));
+        }
+        timeline.repaint();
+    };
+    addAndMakeVisible(pitchSlider);
+
     //--- reverse length knob (0..1): length of the reversed segment ---
     revLenSlider.setRange(0.0, 1.0, 0.01);
     revLenSlider.setDoubleClickReturnValue(true, 1.0);
@@ -222,13 +307,6 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
     };
     addAndMakeVisible(activeBtn);
 
-    //--- probability display (read-only; value set by scroll wheel on timeline) ---
-    probDisplay.setJustificationType(juce::Justification::centred);
-    probDisplay.setFont(juce::Font(13.0f, juce::Font::bold));
-    probDisplay.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
-    probDisplay.setColour(juce::Label::textColourId,       eg::col::ink);
-    addAndMakeVisible(probDisplay);
-
     startTimerHz(30);
 }
 
@@ -247,18 +325,26 @@ void NodeInspector::mouseDown(const juce::MouseEvent&)
 void NodeInspector::resized()
 {
     const int cy = getHeight() / 2;
-    const int kw = 56;   // knob size (square)
-    const int bh = 26;
-    const int bw = 52;
+    const int kw = 52;   // knob size (square)
+    const int bh = 30;
+    const int bw = 58;
 
-    nodeLabel.setBounds(10,  cy - 18, 82, 36);
-    gainSlider.setBounds(104, cy - kw / 2, kw, kw);
-    panSlider.setBounds(172,  cy - kw / 2, kw, kw);
-    revLenSlider.setBounds(248, cy - kw / 2, kw, kw);
-    if (kShowReverseTimingToggle) revLockBtn.setBounds(316, cy - bh / 2, 64, bh);
-    reverseBtn.setBounds(450, cy - bh / 2, bw, bh);
-    activeBtn.setBounds(512,  cy - bh / 2, bw, bh);
-    probDisplay.setBounds(574, cy - bh / 2, 78, bh);
+    //--- the left ~196 px is the painted hero (big level % + chip); no child there ---
+    nodeLabel.setVisible(false);   // superseded by the hero
+
+    const int kx = 224;            // knob columns start right of hero + separator
+    const int kg = 68;             // column pitch
+    gainSlider.setBounds  (kx,          cy - kw / 2, kw, kw);
+    panSlider.setBounds   (kx + kg,     cy - kw / 2, kw, kw);
+    satSlider.setBounds   (kx + 2 * kg, cy - kw / 2, kw, kw);
+    pitchSlider.setBounds (kx + 3 * kg, cy - kw / 2, kw, kw);
+    revLenSlider.setBounds(kx + 4 * kg, cy - kw / 2, kw, kw);
+
+    //--- mode buttons, right-aligned ---
+    int rx = getWidth() - 16;
+    activeBtn.setBounds  (rx - bw, cy - bh / 2, bw, bh);  rx -= bw + 8;
+    reverseBtn.setBounds (rx - bw, cy - bh / 2, bw, bh);  rx -= bw + 8;
+    if (kShowReverseTimingToggle) revLockBtn.setBounds(rx - 64, cy - bh / 2, 64, bh);
 }
 
 //==============================================================================
@@ -266,13 +352,12 @@ void NodeInspector::resized()
 //==============================================================================
 void NodeInspector::paint(juce::Graphics& g)
 {
-    //--- rounded panel background (corners unpainted so the editor's offset
-    //    shadow and window background show through) ---
+    //--- white rounded card (corners unpainted so the editor's soft shadow shows) ---
     auto panelR = getLocalBounds().toFloat().reduced(0.5f);
     g.setColour(eg::col::surface);
-    g.fillRoundedRectangle(panelR, 16.0f);
+    g.fillRoundedRectangle(panelR, eg::kPanelRadius);
     g.setColour(eg::col::line);
-    g.drawRoundedRectangle(panelR, 16.0f, 1.0f);
+    g.drawRoundedRectangle(panelR, eg::kPanelRadius, 1.0f);
 
     int idx = timeline.getSelectedIndex();
 
@@ -280,10 +365,17 @@ void NodeInspector::paint(juce::Graphics& g)
     {
         g.setColour(eg::col::ink3);
         g.setFont(11.0f);
-        g.drawText("Click a node to inspect",
-                   getLocalBounds(), juce::Justification::centred);
+        g.drawText("Click a tap to inspect", 16, getHeight() / 2 - 6, 240, 14,
+                   juce::Justification::centredLeft, false);
         return;
     }
+
+    bool isEcho = (idx >= 0 && idx < (int)processor.nodes.size());
+    bool isRev  = (isEcho && processor.nodes[idx].reverse);
+
+    //--- separator between hero and controls ---
+    g.setColour(eg::col::line);
+    g.drawLine(206.0f, 18.0f, 206.0f, (float)getHeight() - 18.0f, 1.0f);
 
     //--- section labels above each control ---
     g.setColour(eg::col::ink3);
@@ -291,18 +383,17 @@ void NodeInspector::paint(juce::Graphics& g)
 
     auto labelAbove = [&](juce::Rectangle<int> r, const juce::String& text)
     {
-        g.drawText(text, r.withY(r.getY() - 18).withHeight(14),
-                   juce::Justification::centredLeft);
+        g.drawText(text, r.withY(r.getY() - 16).withHeight(13),
+                   juce::Justification::centred);
     };
 
-    bool isRev = (idx >= 0 && idx < (int)processor.nodes.size() && processor.nodes[idx].reverse);
-
-    labelAbove(gainSlider.getBounds(), "GAIN");
+    labelAbove(gainSlider.getBounds(), "LEVEL");
     labelAbove(panSlider.getBounds(),  "PAN");
+    if (isEcho) { labelAbove(satSlider.getBounds(),   "SAT");
+                  labelAbove(pitchSlider.getBounds(), "PITCH"); }
     if (isRev)    labelAbove(revLenSlider.getBounds(), "REV LEN");
     if (isRev && kShowReverseTimingToggle) labelAbove(revLockBtn.getBounds(), "TIMING");
-    if (idx >= 0) labelAbove(reverseBtn.getBounds(), "MODE");
-    if (idx >= 0) labelAbove(probDisplay.getBounds(), "PROB");
+    labelAbove(reverseBtn.getBounds(),  "MODE");
 
     //--- value readouts below each knob ---
     g.setColour(eg::col::ink2);
@@ -322,6 +413,15 @@ void NodeInspector::paint(juce::Graphics& g)
                         : (pan < 0.0f) ? "L " + juce::String(-pan, 2)
                                        : "R " + juce::String( pan, 2);
     valueBelow(panSlider.getBounds(), panStr);
+
+    if (isEcho)
+    {
+        valueBelow(satSlider.getBounds(), juce::String((float)satSlider.getValue(), 2));
+
+        int st = (int)std::round((float)pitchSlider.getValue());
+        juce::String pitchStr = (st == 0) ? "0" : (st > 0 ? "+" : "") + juce::String(st);
+        valueBelow(pitchSlider.getBounds(), pitchStr);
+    }
 
     if (isRev)
         valueBelow(revLenSlider.getBounds(),
@@ -347,12 +447,13 @@ void NodeInspector::syncFromProcessor(int idx)
     //--- show/hide ---
     gainSlider.setVisible(isDry || isEcho);
     panSlider.setVisible(isDry || isEcho);
+    satSlider.setVisible(isEcho);
+    pitchSlider.setVisible(isEcho);
     revLenSlider.setVisible(isRev);
     revLockBtn.setVisible(isRev && kShowReverseTimingToggle);
     reverseBtn.setVisible(isEcho);
     activeBtn.setVisible(isEcho);
-    probDisplay.setVisible(isEcho);
-    nodeLabel.setVisible(isDry || isEcho);
+    nodeLabel.setVisible(false);   // superseded by the painted hero
 
     syncing = true;
 
@@ -367,18 +468,65 @@ void NodeInspector::syncFromProcessor(int idx)
         const auto& n = processor.nodes[idx];
         nodeLabel.setText("@ " + juce::String(n.positionBeats + 1.0f, 2) + "b",
                           juce::dontSendNotification);
-        if (!gainDragging) gainSlider.setValue(n.gain, juce::dontSendNotification);
-        if (!panDragging)  panSlider.setValue(n.pan,  juce::dontSendNotification);
+        if (!gainDragging)  gainSlider.setValue(n.gain, juce::dontSendNotification);
+        if (!panDragging)   panSlider.setValue(n.pan,  juce::dontSendNotification);
+        if (!satDragging)   satSlider.setValue(n.saturation, juce::dontSendNotification);
+        if (!pitchDragging) pitchSlider.setValue(n.pitchSemitones, juce::dontSendNotification);
         if (!revLenDragging) revLenSlider.setValue(n.reverseLength, juce::dontSendNotification);
         revLockBtn.setToggleState(n.reverseLock, juce::dontSendNotification);
         revLockBtn.setButtonText(n.reverseLock ? "IN TIME" : "FREE");
         reverseBtn.setToggleState(n.reverse, juce::dontSendNotification);
         activeBtn.setToggleState(n.active,   juce::dontSendNotification);
-        probDisplay.setText(juce::String((int)std::round(n.probability * 100)) + "%",
-                            juce::dontSendNotification);
     }
 
     syncing = false;
-    repaint();
-    timeline.repaint();   // keep timeline in sync with any state loaded by the host
+
+    //--- repaint only on real change.  This used to call repaint() + timeline.repaint()
+    //    unconditionally every tick (30x/sec), saturating the message thread that also
+    //    handles mouse clicks — the main cause of the sluggish feel. ---
+    juce::uint64 isig = inspectorSig(idx);
+    if (isig != lastInspectorSig) { lastInspectorSig = isig; repaint(); }
+
+    //--- the timeline draws all node data; repaint it only when that data changed
+    //    (e.g. host loaded state, or a value moved elsewhere) rather than continuously ---
+    juce::uint64 msig = modelSig();
+    if (msig != lastModelSig) { lastModelSig = msig; timeline.repaint(); }
+}
+
+//==============================================================================
+// Change-detection signatures — fold the state each view draws into one integer
+//==============================================================================
+juce::uint64 NodeInspector::inspectorSig(int idx) const
+{
+    juce::uint64 h = 1469598103934665603ull;
+    mixI(h, idx);
+    if (idx == -2)
+    {
+        mixF(h, processor.dry.gain);
+        mixF(h, processor.dry.pan);
+    }
+    else if (idx >= 0 && idx < (int)processor.nodes.size())
+    {
+        const auto& n = processor.nodes[idx];
+        mixF(h, n.positionBeats); mixF(h, n.gain);           mixF(h, n.pan);
+        mixF(h, n.saturation);    mixF(h, n.pitchSemitones); mixF(h, n.reverseLength);
+        mixI(h, n.reverse ? 1 : 0); mixI(h, n.active ? 1 : 0); mixI(h, n.reverseLock ? 1 : 0);
+    }
+    return h;
+}
+
+juce::uint64 NodeInspector::modelSig() const
+{
+    juce::uint64 h = 1469598103934665603ull;
+    mixF(h, processor.dry.gain);        mixF(h, processor.dry.pan);
+    mixF(h, processor.gridLengthBeats); mixF(h, processor.snapStepBeats);
+    mixI(h, (int)processor.nodes.size());
+    for (const auto& n : processor.nodes)
+    {
+        mixF(h, n.positionBeats); mixF(h, n.gain);           mixF(h, n.pan);
+        mixF(h, n.saturation);    mixF(h, n.pitchSemitones); mixF(h, n.reverseLength);
+        mixF(h, n.probability);
+        mixI(h, n.reverse ? 1 : 0); mixI(h, n.active ? 1 : 0); mixI(h, n.reverseLock ? 1 : 0);
+    }
+    return h;
 }

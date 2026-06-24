@@ -19,10 +19,10 @@ static juce::Colour satToColour(float sat)
 
 static juce::Colour pitchToColour(float semi)
 {
-    //--- unison lilac at 0; cool blue for down, warm pink for up ---
+    //--- soft green: pale at unison, deeper as the interval grows (either direction —
+    //    the +N / -N readout above each dot still shows up vs down) ---
     float t = juce::jlimit(0.0f, 1.0f, std::abs(semi) / 12.0f);
-    return semi < 0.0f ? eg::col::lilac.interpolatedWith(eg::col::blue, t)
-                       : eg::col::lilac.interpolatedWith(eg::col::pink, t);
+    return eg::col::greenSoft.interpolatedWith(eg::col::green, t);
 }
 
 //==============================================================================
@@ -367,9 +367,9 @@ void NodeTimeline::paint(juce::Graphics& g)
     //    offset shadow and window background show through them) ---
     auto panelR = juce::Rectangle<float>(0.5f, 0.5f, w - 1.0f, h - 1.0f);
     g.setColour(eg::col::surface);
-    g.fillRoundedRectangle(panelR, 16.0f);
+    g.fillRoundedRectangle(panelR, eg::kPanelRadius);
     g.setColour(eg::col::line);
-    g.drawRoundedRectangle(panelR, 16.0f, 1.0f);
+    g.drawRoundedRectangle(panelR, eg::kPanelRadius, 1.0f);
 
     //--- grid lines: step is an absolute musical value (e.g. 0.25 = 1/16 note),
     //    independent of bar length.  Beat lines (integer positions) are drawn brighter. ---
@@ -401,6 +401,11 @@ void NodeTimeline::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xffd9cfe4));
     g.drawHorizontalLine((int)(h - kPadY * 0.5f), kPadX, w - kPadX);
 
+    //--- each tap reads as a vertical slider/fader: a bar from its level down to the
+    //    baseline whose WIDTH = half of one currently-selected subdivision cell (so it
+    //    scales with the GRID: coarse grid → wide bars, fine grid → thin) ---
+    const float barW = juce::jmax(2.0f, (beatToX(processor.snapStepBeats) - beatToX(0.0f)) * 0.5f);
+
     //--- helper: draw one node ---
     //    inactive nodes are rendered grey + dimmed so they read as "off"
     //    reversed nodes show a left-pointing arrow overlay
@@ -410,8 +415,15 @@ void NodeTimeline::paint(juce::Graphics& g)
         auto  c     = active ? panToColour(pan) : juce::Colour(0xffc9c2d3);
         float alpha = active ? juce::jmap(probability, 0.0f, 1.0f, 0.15f, 1.0f) : 0.30f;
 
-        g.setColour(c.withAlpha(0.25f * alpha));
-        g.drawLine(x, y + kNodeRadius, x, h - kPadY * 0.5f, active ? 1.5f : 0.8f);
+        //--- slider bar (level → baseline) ---
+        {
+            float barTop = y;
+            float barBot = h - kPadY * 0.5f;
+            g.setColour(c.withAlpha((active ? 0.20f : 0.12f) * alpha));
+            g.fillRoundedRectangle(x - barW * 0.5f, barTop, barW,
+                                   juce::jmax(0.0f, barBot - barTop),
+                                   juce::jmin(barW * 0.5f, 4.0f));
+        }
 
         g.setColour(c.withAlpha(0.20f * alpha));
         float gr = kNodeRadius + 5.0f;
@@ -481,11 +493,12 @@ void NodeTimeline::paint(juce::Graphics& g)
                    juce::Justification::centred, false);
     }
 
-    //--- overlay: dim gain layer when any edit mode is active ---
+    //--- overlay: dim gain layer when any edit mode is active.  Use the rounded
+    //    panel shape (not a square fill) so the card's corners stay rounded. ---
     if (editMode != EditMode::None)
     {
         g.setColour(eg::col::surface.withAlpha(0.68f));
-        g.fillRect(0.0f, 0.0f, w, h);
+        g.fillRoundedRectangle(panelR, eg::kPanelRadius);
     }
 
     //--- pan overlay ---
@@ -612,7 +625,7 @@ void NodeTimeline::paint(juce::Graphics& g)
             }
         }
         g.setFont(9.0f);
-        g.setColour(eg::col::lilacDeep.withAlpha(0.95f));
+        g.setColour(eg::col::green.withAlpha(0.95f));
         g.drawText("PITCH", (int)(w - 50.0f), 6, 44, 10, juce::Justification::centredRight, false);
     }
 
@@ -1108,6 +1121,34 @@ void NodeTimeline::mouseUp(const juce::MouseEvent& e)
 
 void NodeTimeline::mouseDoubleClick(const juce::MouseEvent& e)
 {
+    //--- in an overlay edit mode, double-click resets a tap to its default value
+    //    (pan = centre, sat = 0, pitch = unison).  If the double-clicked tap is part
+    //    of the current selection, the whole selection resets.  The trailing mouseUp
+    //    commits the change as a single undo step. ---
+    if (editMode != EditMode::None)
+    {
+        int hit = (editMode == EditMode::Pan) ? panNodeAt(e.position)
+                : (editMode == EditMode::Sat) ? satNodeAt(e.position)
+                                              : pitchNodeAt(e.position);
+        if (hit < 0) return;
+
+        bool hitInSel = std::find(multiSelection.begin(), multiSelection.end(), hit)
+                        != multiSelection.end();
+        std::vector<int> targets = (hitInSel && multiSelection.size() > 1)
+                                   ? multiSelection : std::vector<int>{ hit };
+
+        const juce::ScopedLock sl(processor.getCallbackLock());
+        for (int i : targets)
+        {
+            if (i < 0 || i >= (int)processor.nodes.size()) continue;
+            if      (editMode == EditMode::Pan) processor.nodes[i].pan            = 0.0f;
+            else if (editMode == EditMode::Sat) processor.nodes[i].saturation     = 0.0f;
+            else                                processor.nodes[i].pitchSemitones = 0.0f;
+        }
+        repaint();
+        return;
+    }
+
     if (dryNodeAt(e.position)) return; // dry node has no reverse
 
     int hit = echoNodeAt(e.position);

@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  *{ margin:0; padding:0; box-sizing:border-box; }
+  :root{
+    /* EchoGrid palette — unchanged (Theme.h) */
+    --ink:#33333a; --ink2:#87838d; --ink3:#b4afba;
+    --lilac:#c2a4d6; --lilac-soft:#dcccea; --lilac-deep:#a981c6;
+    --pink:#ffafcc; --pink-soft:#ffc8dd;
+    --blue:#a2d2ff; --blue-soft:#bde0fe;
+    --line:#efeaf3; --line2:#e7e0ee;
+    --window:#f3edf6; --card:#ffffff; --surface:#fffdff;
+    /* dashboard-inspired soft shadow (replaces the flat offset block) */
+    --soft:0 1px 2px rgba(70,55,100,.05), 0 14px 30px -16px rgba(95,72,128,.28);
+  }
+  html,body{ width:1240px; height:840px; }
+  body{
+    font-family:-apple-system,"SF Pro Text",system-ui,sans-serif;
+    background:radial-gradient(130% 120% at 22% -10%, #fbf4fb 0%, var(--window) 55%, #ece8f4 100%);
+    color:var(--ink); -webkit-font-smoothing:antialiased;
+  }
+  .page{ width:1240px; height:840px; padding:28px 32px 30px; display:flex; flex-direction:column; gap:20px; }
+
+  /* ---------- page header (sits on the canvas, dashboard-style) ---------- */
+  .top{ display:flex; align-items:center; gap:20px; }
+  .brand{ line-height:1; min-width:150px; }
+  .brand .name{ font-size:23px; font-weight:600; letter-spacing:-.5px; }
+  .brand .name b{ color:var(--lilac-deep); font-weight:600; }
+  .brand .sub{ font-size:10px; letter-spacing:1.6px; text-transform:uppercase; color:var(--ink3); margin-top:6px; }
+  .spacer{ flex:1; }
+  .grp{ display:flex; align-items:center; gap:9px; }
+  .lbl{ font-size:9px; letter-spacing:1.4px; text-transform:uppercase; color:var(--ink3); }
+
+  .seg{ display:flex; background:var(--card); border:1px solid var(--line2); border-radius:11px; padding:3px; gap:2px; box-shadow:var(--soft); }
+  .seg button{ border:0; background:transparent; font:inherit; font-size:12.5px; font-weight:600; color:var(--ink2); width:30px; height:27px; border-radius:8px; cursor:pointer; }
+  .seg.layer button{ width:auto; padding:0 13px; }
+  .seg button.on{ background:var(--lilac); color:#fff; box-shadow:0 3px 7px -2px rgba(169,129,198,.85); }
+
+  .sel{ display:flex; align-items:center; gap:8px; background:var(--card); border:1px solid var(--line2); border-radius:11px; height:33px; padding:0 12px; font-size:12.5px; font-weight:600; box-shadow:var(--soft); }
+  .sel .chev{ color:var(--ink3); }
+  .iconbtn{ width:33px; height:33px; border-radius:10px; background:var(--card); border:1px solid var(--line2); color:var(--ink2); display:flex; align-items:center; justify-content:center; cursor:pointer; box-shadow:var(--soft); }
+  .iconbtn svg{ width:16px; height:16px; }
+
+  /* ---------- card scaffolding ---------- */
+  .row{ display:flex; gap:20px; }
+  .card{ background:var(--card); border:1px solid var(--line); border-radius:20px; box-shadow:var(--soft); padding:16px 18px; display:flex; flex-direction:column; }
+  .chead{ display:flex; align-items:center; gap:10px; margin-bottom:4px; }
+  .chead .ic{ width:26px; height:26px; border-radius:8px; background:#f6f1f8; border:1px solid var(--line); display:flex; align-items:center; justify-content:center; color:var(--lilac-deep); }
+  .chead .ic svg{ width:15px; height:15px; }
+  .chead .t{ font-size:11px; letter-spacing:1.4px; text-transform:uppercase; color:var(--ink2); font-weight:600; }
+  .chead .right{ margin-left:auto; display:flex; align-items:center; gap:8px; }
+  .readout{ font-size:11px; font-weight:600; color:var(--ink2); background:#f7f3f9; border:1px solid var(--line2); border-radius:8px; padding:5px 10px; letter-spacing:.3px; }
+  .readout b{ color:var(--lilac-deep); }
+  .xbtn{ width:28px; height:28px; border-radius:8px; border:1px solid var(--line2); background:#fff; color:var(--ink3); display:flex; align-items:center; justify-content:center; }
+  .xbtn svg{ width:13px; height:13px; }
+
+  /* ---------- timeline card ---------- */
+  .timeline{ flex:1; }
+  svg.grid{ width:100%; flex:1; display:block; margin-top:6px; }
+
+  /* ---------- global card ---------- */
+  .global{ width:252px; }
+  .knobrow{ display:flex; justify-content:space-around; gap:6px; margin-top:6px; }
+  .knobwrap{ display:flex; flex-direction:column; align-items:center; gap:6px; }
+  .knobwrap .kl{ font-size:10.5px; color:var(--ink2); font-weight:600; }
+  .knobwrap .kv{ font-size:9.5px; color:var(--ink3); }
+  .divider{ height:1px; background:var(--line); margin:11px 0 11px; }
+  .toggles{ display:flex; flex-direction:column; gap:10px; }
+  .toggle{ display:flex; align-items:center; justify-content:space-between; font-size:12.5px; font-weight:500; }
+  .pill{ width:42px; height:24px; border-radius:13px; background:#e9e2ef; position:relative; transition:.2s; }
+  .pill::after{ content:""; position:absolute; width:19px; height:19px; border-radius:50%; background:#fff; top:2.5px; left:2.5px; box-shadow:0 1px 3px rgba(90,70,120,.28); }
+  .pill.on{ background:var(--lilac); } .pill.on.pink{ background:var(--pink); }
+  .pill.on::after{ left:20.5px; }
+
+  /* knob */
+  .knob{ position:relative; width:62px; height:62px; }
+  .knob .ring{ position:absolute; inset:0; border-radius:50%;
+    background:conic-gradient(from 225deg, var(--c) calc(var(--v)*270deg), #ece5ef calc(var(--v)*270deg) 270deg, transparent 270deg 360deg);
+    -webkit-mask:radial-gradient(transparent 60%, #000 62%); mask:radial-gradient(transparent 60%, #000 62%); }
+  .knob .cap{ position:absolute; inset:9px; border-radius:50%; background:linear-gradient(160deg,#fff,#f5eef6); box-shadow:0 2px 6px rgba(90,70,120,.14), inset 0 1px 0 #fff; }
+  .knob .ptr{ position:absolute; left:50%; top:8px; width:3px; height:13px; margin-left:-1.5px; background:var(--c); border-radius:2px; transform-origin:50% 23px; transform:rotate(calc(225deg + var(--v)*270deg)); filter:brightness(.92); }
+
+  /* ---------- inspector card ---------- */
+  .inspector{ flex:1; }
+  .ins-body{ display:flex; align-items:center; gap:26px; margin-top:10px; }
+  .hero{ min-width:172px; }
+  .hero .htag{ font-size:9px; letter-spacing:1.5px; text-transform:uppercase; color:var(--ink3); }
+  .hero .hnum{ font-size:40px; font-weight:700; letter-spacing:-1.5px; line-height:1.05; margin:3px 0 7px; }
+  .hero .hmeta{ display:flex; align-items:center; gap:8px; }
+  .chip-id{ display:flex; align-items:center; gap:6px; font-size:11.5px; font-weight:600; color:var(--ink); background:#f7f3f9; border:1px solid var(--line2); border-radius:20px; padding:4px 10px; }
+  .chip-id .dot{ width:8px; height:8px; border-radius:50%; background:var(--lilac); }
+  .delta{ display:flex; align-items:center; gap:4px; font-size:11px; font-weight:600; color:var(--lilac-deep); background:var(--lilac-soft); border-radius:20px; padding:4px 9px; }
+  .delta svg{ width:11px; height:11px; }
+  .ins-sep{ width:1px; height:64px; background:var(--line); }
+  .ins-knobs{ display:flex; gap:24px; }
+  .ins-ctl{ margin-left:auto; display:flex; align-items:center; gap:9px; }
+  .tbtn{ font-size:11.5px; font-weight:600; color:var(--ink2); background:#fff; border:1px solid var(--line2); border-radius:10px; height:36px; padding:0 16px; display:flex; align-items:center; cursor:pointer; }
+  .tbtn.on{ background:var(--lilac); color:#fff; border-color:transparent; }
+  .tbtn.on.blue{ background:var(--blue); color:var(--ink); border-color:transparent; }
+</style>
+</head>
+<body>
+  <div class="page">
+
+    <!-- ===== page header ===== -->
+    <div class="top">
+      <div class="brand">
+        <div class="name">echo<b>grid</b></div>
+        <div class="sub">multi&#8209;tap delay</div>
+      </div>
+      <div class="spacer"></div>
+      <div class="grp"><span class="lbl">Beats</span>
+        <div class="seg"><button>1</button><button>2</button><button class="on">4</button><button>8</button></div>
+      </div>
+      <div class="grp"><span class="lbl">Grid</span>
+        <div class="sel">1/16 <span class="chev">&#9662;</span></div>
+      </div>
+      <div class="grp"><span class="lbl">Layer</span>
+        <div class="seg layer"><button class="on">Gain</button><button>Pan</button><button>Sat</button></div>
+      </div>
+      <div class="iconbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 5 5v1"/></svg></div>
+      <div class="iconbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 14 5-5-5-5"/><path d="M20 9H9a5 5 0 0 0-5 5v1"/></svg></div>
+    </div>
+
+    <!-- ===== row 1 : timeline + global ===== -->
+    <div class="row" style="flex:1; min-height:0;">
+
+      <div class="card timeline">
+        <div class="chead">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg></div>
+          <div class="t">Timeline</div>
+          <div class="right">
+            <span class="readout">4 beats &middot; <b>1/16</b></span>
+            <div class="xbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg></div>
+          </div>
+        </div>
+
+        <svg class="grid" viewBox="0 0 820 290" preserveAspectRatio="none">
+          <defs>
+            <linearGradient id="area" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#c2a4d6" stop-opacity=".34"/>
+              <stop offset="1" stop-color="#c2a4d6" stop-opacity="0"/>
+            </linearGradient>
+            <pattern id="hatch" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+              <line x1="0" y1="0" x2="0" y2="7" stroke="#c2a4d6" stroke-width="1.1" stroke-opacity=".18"/>
+            </pattern>
+          </defs>
+          <!-- subdivision lines -->
+          <g stroke="#f4eff7" stroke-width="1">
+            <line x1="85" y1="34" x2="85" y2="250"/><line x1="130" y1="34" x2="130" y2="250"/><line x1="175" y1="34" x2="175" y2="250"/>
+            <line x1="265" y1="34" x2="265" y2="250"/><line x1="310" y1="34" x2="310" y2="250"/><line x1="355" y1="34" x2="355" y2="250"/>
+            <line x1="445" y1="34" x2="445" y2="250"/><line x1="490" y1="34" x2="490" y2="250"/><line x1="535" y1="34" x2="535" y2="250"/>
+            <line x1="625" y1="34" x2="625" y2="250"/><line x1="670" y1="34" x2="670" y2="250"/><line x1="715" y1="34" x2="715" y2="250"/>
+          </g>
+          <!-- beat lines -->
+          <g stroke="#e9e1f0" stroke-width="1.4">
+            <line x1="40" y1="30" x2="40" y2="254"/><line x1="220" y1="30" x2="220" y2="254"/>
+            <line x1="400" y1="30" x2="400" y2="254"/><line x1="580" y1="30" x2="580" y2="254"/><line x1="760" y1="30" x2="760" y2="254"/>
+          </g>
+          <line x1="40" y1="250" x2="760" y2="250" stroke="#ddd3e7" stroke-width="1.5"/>
+          <g fill="#bcb3c6" font-size="10" font-family="-apple-system,sans-serif">
+            <text x="44" y="270">1</text><text x="224" y="270">2</text><text x="404" y="270">3</text><text x="584" y="270">4</text>
+          </g>
+          <text x="28" y="26" fill="#b0a6bb" font-size="9.5" font-family="-apple-system,sans-serif">DRY</text>
+
+          <!-- area fill + hatch texture (dashboard touch) -->
+          <path d="M40,42 L175,98 L265,132 L400,74 L490,162 L580,122 L670,176 L715,198 L715,250 L40,250 Z" fill="url(#area)"/>
+          <path d="M40,42 L175,98 L265,132 L400,74 L490,162 L580,122 L670,176 L715,198 L715,250 L40,250 Z" fill="url(#hatch)"/>
+          <polyline points="40,42 175,98 265,132 400,74 490,162 580,122 670,176 715,198" fill="none" stroke="#a981c6" stroke-width="1.6" stroke-dasharray="2 4" stroke-linecap="round"/>
+
+          <!-- stems -->
+          <g stroke="#dcccea" stroke-width="2.4" stroke-linecap="round">
+            <line x1="40" y1="250" x2="40" y2="42"/><line x1="175" y1="250" x2="175" y2="98"/>
+            <line x1="265" y1="250" x2="265" y2="132"/><line x1="490" y1="250" x2="490" y2="162"/>
+            <line x1="580" y1="250" x2="580" y2="122"/><line x1="670" y1="250" x2="670" y2="176"/>
+            <line x1="715" y1="250" x2="715" y2="198"/>
+          </g>
+          <line x1="400" y1="250" x2="400" y2="74" stroke="#a981c6" stroke-width="2.6" stroke-linecap="round"/>
+
+          <!-- taps -->
+          <g>
+            <circle cx="40" cy="42" r="8" fill="#a981c6"/><circle cx="175" cy="98" r="8" fill="#c2a4d6"/>
+            <circle cx="265" cy="132" r="8" fill="#c2a4d6"/><circle cx="490" cy="162" r="8" fill="#c2a4d6"/>
+            <circle cx="580" cy="122" r="8" fill="#c2a4d6"/><circle cx="670" cy="176" r="8" fill="#c2a4d6"/>
+            <circle cx="715" cy="198" r="8" fill="#c2a4d6"/>
+          </g>
+
+          <!-- selected tap + dark dashboard tooltip -->
+          <circle cx="400" cy="74" r="13" fill="#fff" stroke="#33333a" stroke-width="2.4"/>
+          <circle cx="400" cy="74" r="6" fill="#c2a4d6"/>
+          <g transform="translate(414,8)">
+            <rect x="0" y="0" width="150" height="58" rx="9" fill="#33333a"/>
+            <text x="14" y="20" fill="#fff" font-size="11.5" font-weight="600" font-family="-apple-system,sans-serif">Tap 4 &middot; beat 3</text>
+            <circle cx="18" cy="35" r="3.5" fill="#c2a4d6"/><text x="28" y="39" fill="#cfc8d8" font-size="10.5" font-family="-apple-system,sans-serif">Level</text><text x="136" y="39" fill="#fff" font-size="10.5" font-weight="600" text-anchor="end" font-family="-apple-system,sans-serif">84%</text>
+            <circle cx="18" cy="50" r="3.5" fill="#a2d2ff"/><text x="28" y="54" fill="#cfc8d8" font-size="10.5" font-family="-apple-system,sans-serif">Pan</text><text x="136" y="54" fill="#fff" font-size="10.5" font-weight="600" text-anchor="end" font-family="-apple-system,sans-serif">L 24</text>
+          </g>
+        </svg>
+      </div>
+
+      <div class="card global">
+        <div class="chead">
+          <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></div>
+          <div class="t">Global</div>
+        </div>
+        <div class="knobrow">
+          <div class="knobwrap"><div class="knob" style="--v:.28;--c:#a2d2ff"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div><div class="kl">HP</div><div class="kv">120 Hz</div></div>
+          <div class="knobwrap"><div class="knob" style="--v:.74;--c:#a2d2ff"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div><div class="kl">LP</div><div class="kv">8.4 kHz</div></div>
+        </div>
+        <div class="knobrow" style="justify-content:center; margin-top:10px;">
+          <div class="knobwrap"><div class="knob" style="--v:.46;--c:#ffafcc;width:62px;height:62px"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div><div class="kl">Drive</div><div class="kv">tape &middot; 46%</div></div>
+        </div>
+        <div class="divider"></div>
+        <div class="toggles">
+          <div class="toggle"><span>Filter dry</span><div class="pill"></div></div>
+          <div class="toggle"><span>Global tape</span><div class="pill on pink"></div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== row 2 : selected-tap inspector ===== -->
+    <div class="card inspector">
+      <div class="chead">
+        <div class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/></svg></div>
+        <div class="t">Selected Tap</div>
+      </div>
+      <div class="ins-body">
+        <div class="hero">
+          <div class="htag">Tap level</div>
+          <div class="hnum">84%</div>
+          <div class="hmeta">
+            <span class="chip-id"><span class="dot"></span>Tap 4</span>
+            <span class="delta"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17 17 7M9 7h8v8"/></svg>beat 3</span>
+          </div>
+        </div>
+        <div class="ins-sep"></div>
+        <div class="ins-knobs">
+          <div class="knobwrap"><div class="knob" style="--v:.84;--c:#c2a4d6;width:52px;height:52px"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div><div class="kl">Level</div></div>
+          <div class="knobwrap"><div class="knob" style="--v:.38;--c:#a2d2ff;width:52px;height:52px"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div><div class="kl">Pan</div></div>
+          <div class="knobwrap"><div class="knob" style="--v:.40;--c:#ffafcc;width:52px;height:52px"><div class="ring"></div><div class="cap"></div><div class="ptr"></div></div><div class="kl">Rev Len</div></div>
+        </div>
+        <div class="ins-ctl">
+          <div class="tbtn">In Time</div>
+          <div class="tbtn on blue">Reverse</div>
+          <div class="tbtn on">On</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</body>
+</html>

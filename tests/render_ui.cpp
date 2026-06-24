@@ -9,6 +9,7 @@
 #include "../Source/PluginProcessor.h"
 #include "../Source/PluginEditor.h"
 #include "../Source/NodeTimeline.h"
+#include "../Source/NodeInspector.h"
 
 static void writePng(juce::Component& c, const juce::String& path)
 {
@@ -49,6 +50,23 @@ int main()
     tl.setEditMode(NodeTimeline::EditMode::Pitch);
     tl.setSize(760, 400);
     writePng(tl, "/private/tmp/echogrid_pitch_overlay.png");
+
+    //--- inspector alone with a tap selected, to eyeball the new hero / header /
+    //    chip / button styling (the offscreen editor has nothing selected) ---
+    if (!proc.nodes.empty())
+    {
+        proc.nodes[0].gain = 0.84f;
+        proc.nodes[0].pan  = -0.24f;
+        juce::UndoManager um2;
+        NodeTimeline tl2(proc, um2);
+        tl2.selectForRender(0);
+        EchoGridLAF laf;                       // same look the editor applies to its children
+        NodeInspector insp(proc, tl2);
+        insp.setLookAndFeel(&laf);
+        insp.setSize(1008, 92);
+        writePng(insp, "/private/tmp/echogrid_inspector.png");
+        insp.setLookAndFeel(nullptr);
+    }
 
     return 0;
 }
