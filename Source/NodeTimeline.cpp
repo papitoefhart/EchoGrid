@@ -41,6 +41,8 @@ struct NodeAction : public juce::UndoableAction
         const juce::ScopedLock sl(proc.getCallbackLock());
         proc.nodes           = after.nodes;
         proc.dry             = after.dry;
+        *proc.pDryGain       = after.dry.gain;   // dry level/pan are parameter-backed now
+        *proc.pDryPan        = after.dry.pan;
         proc.gridLengthBeats = after.gridLengthBeats;
         proc.snapStepBeats   = after.snapStepBeats;
         return true;
@@ -51,6 +53,8 @@ struct NodeAction : public juce::UndoableAction
         const juce::ScopedLock sl(proc.getCallbackLock());
         proc.nodes           = before.nodes;
         proc.dry             = before.dry;
+        *proc.pDryGain       = before.dry.gain;
+        *proc.pDryPan        = before.dry.pan;
         proc.gridLengthBeats = before.gridLengthBeats;
         proc.snapStepBeats   = before.snapStepBeats;
         return true;
@@ -106,6 +110,25 @@ void NodeTimeline::timerCallback()
     stopTimer();
     flushProbGesture();   // gesture ended: commit the accumulated change as one undo step
     repaint();
+}
+
+//==============================================================================
+// setPlayhead — fold the host song position into the current subdivision cell and
+// repaint only when that cell changes (so the playhead steps without a per-frame
+// repaint).  Called from the editor timer; -1 hides it when the transport is stopped.
+//==============================================================================
+void NodeTimeline::setPlayhead(double songBeats, bool playing)
+{
+    int step = -1;
+    if (playing)
+    {
+        const float len  = juce::jmax(0.25f, processor.gridLengthBeats);
+        const float snap = juce::jmax(0.0001f, processor.snapStepBeats);
+        const double inPat = songBeats - std::floor(songBeats / len) * len;   // 0..len
+        const int   nSteps = juce::jmax(1, (int)std::round(len / snap));
+        step = juce::jlimit(0, nSteps - 1, (int)std::floor(inPat / snap));
+    }
+    if (step != playheadStep) { playheadStep = step; repaint(); }
 }
 
 //--- commit a pending probability-scroll gesture as a single undo entry ---
@@ -368,22 +391,55 @@ void NodeTimeline::paint(juce::Graphics& g)
     auto panelR = juce::Rectangle<float>(0.5f, 0.5f, w - 1.0f, h - 1.0f);
     g.setColour(eg::col::surface);
     g.fillRoundedRectangle(panelR, eg::kPanelRadius);
-    g.setColour(eg::col::line);
-    g.drawRoundedRectangle(panelR, eg::kPanelRadius, 1.0f);
+    eg::strokeCardBorder(g, panelR);
+
+    //--- step-sequencer PLAYHEAD: light the current subdivision cell (lilac band + solid
+    //    top cap + side edges).  Drawn here, behind the grid lines and nodes, so they read
+    //    on top.  playheadStep is the snapped cell from the host transport; -1 = stopped. ---
+    if (playheadStep >= 0)
+    {
+        const float snap = juce::jmax(0.0001f, processor.snapStepBeats);
+        const float px0  = beatToX(playheadStep * snap);
+        const float px1  = beatToX((playheadStep + 1) * snap);
+        const float ptop = kPadY * 0.5f;
+        const float pbot = h - kPadY * 0.5f;
+        g.setColour(eg::col::lilacDeep.withAlpha(0.20f));
+        g.fillRect(px0, ptop, px1 - px0, pbot - ptop);          // lit cell band
+        g.setColour(eg::col::lilacDeep);
+        g.fillRect(px0, ptop, px1 - px0, 5.0f);                 // solid top cap
+        g.setColour(eg::col::lilacDeep.withAlpha(0.55f));
+        g.drawVerticalLine((int)px0, ptop, pbot);               // side edges
+        g.drawVerticalLine((int)px1, ptop, pbot);
+    }
 
     //--- grid lines: step is an absolute musical value (e.g. 0.25 = 1/16 note),
     //    independent of bar length.  Beat lines (integer positions) are drawn brighter. ---
     const float step     = processor.snapStepBeats;
     const int   numSteps = (int)std::round(processor.gridLengthBeats / step);
 
+    //--- full subdivision grid is always drawn (the "fader tracks").  Each tap's bright
+    //    value-bar is painted on top, filling from its level down to the baseline, so the
+    //    value reads from the bar's height while the grid stays visible behind it. ---
+    const float gridTop = kPadY * 0.5f;
+    const float gridBot = h - kPadY * 0.5f;
     for (int i = 0; i <= numSteps; ++i)
     {
         float pos    = i * step;
         float x      = beatToX(pos);
         float nearest = std::round(pos);
         bool  isBeat  = std::abs(pos - nearest) < step * 0.05f;  // within 5% of a beat position
-        g.setColour(isBeat ? juce::Colour(0xffe5dcef) : eg::col::line);
-        g.drawVerticalLine((int)x, kPadY * 0.5f, h - kPadY * 0.5f);
+
+        //--- if a tap (or the dry node) sits on this line, stop it at the tap's value so
+        //    it reads as the empty fader TRACK above the bar; the bar then covers the rest
+        //    and the line no longer bleeds through the translucent fill ---
+        float bot = gridBot;
+        if (std::abs(pos) < step * 0.05f) bot = gainToY(processor.dry.gain);
+        for (const auto& n : processor.nodes)
+            if (std::abs(n.positionBeats - pos) < step * 0.05f) { bot = gainToY(n.gain); break; }
+
+        g.setColour(isBeat ? juce::Colour(0xff4a4556) : eg::col::line);  // beat lines a touch brighter
+        //--- sub-pixel-centred 1px line (drawVerticalLine truncates x to a whole pixel) ---
+        g.fillRect(x - 0.5f, gridTop, 1.0f, juce::jmax(0.0f, bot - gridTop));
     }
 
     //--- labels: DRY = musical beat 1; beat columns start at 2 so numbers
@@ -398,13 +454,15 @@ void NodeTimeline::paint(juce::Graphics& g)
                    juce::Justification::centred, false);
 
     //--- bottom baseline ---
-    g.setColour(juce::Colour(0xffd9cfe4));
+    g.setColour(eg::col::line2);
     g.drawHorizontalLine((int)(h - kPadY * 0.5f), kPadX, w - kPadX);
 
     //--- each tap reads as a vertical slider/fader: a bar from its level down to the
     //    baseline whose WIDTH = half of one currently-selected subdivision cell (so it
     //    scales with the GRID: coarse grid → wide bars, fine grid → thin) ---
-    const float barW = juce::jmax(2.0f, (beatToX(processor.snapStepBeats) - beatToX(0.0f)) * 0.5f);
+    //--- fixed bar width = the 1/32 cell (0.125 beat), so bars stay this thin at EVERY
+    //    grid subdivision instead of widening on coarse grids ---
+    const float barW = juce::jmax(2.0f, (beatToX(0.125f) - beatToX(0.0f)) * 0.32f);
 
     //--- helper: draw one node ---
     //    inactive nodes are rendered grey + dimmed so they read as "off"
@@ -412,34 +470,69 @@ void NodeTimeline::paint(juce::Graphics& g)
     auto drawNode = [&](float x, float y, float pan, float probability,
                         bool isReversed, bool active, bool selected)
     {
-        auto  c     = active ? panToColour(pan) : juce::Colour(0xffc9c2d3);
+        auto  c     = active ? panToColour(pan) : juce::Colour(0xff5c5966);  // inactive = muted grey on dark
         float alpha = active ? juce::jmap(probability, 0.0f, 1.0f, 0.15f, 1.0f) : 0.30f;
 
-        //--- slider bar (level → baseline) ---
+        //--- slider bar (level → baseline): a luminous fader fill — soft bloom behind,
+        //    a vertical gradient (bright at the value-head, softer at the foot) and a
+        //    bright cap at the value, so it reads as lit rather than a flat block.
+        //    Rounded only at the TOP so the foot sits flush on the baseline. ---
         {
             float barTop = y;
             float barBot = h - kPadY * 0.5f;
-            g.setColour(c.withAlpha((active ? 0.20f : 0.12f) * alpha));
-            g.fillRoundedRectangle(x - barW * 0.5f, barTop, barW,
-                                   juce::jmax(0.0f, barBot - barTop),
-                                   juce::jmin(barW * 0.5f, 4.0f));
+            float barH   = juce::jmax(0.0f, barBot - barTop);
+            float r      = juce::jmin(barW * 0.5f, 4.0f);
+            auto  topBar = [&](float bw, float topR)
+            {
+                juce::Path p;
+                p.addRoundedRectangle(x - bw * 0.5f, barTop, bw, barH, topR, topR,
+                                      true, true, false, false);
+                return p;
+            };
+
+            //--- crisp gradient fill.  Forward: bright head → soft foot.  Reverse: same
+            //    purple, but the bright block is moved to the FOOT with a defined threshold
+            //    (top half held dim, then ramps up to full-bright low down) so it clearly
+            //    reads "reversed" rather than just looking dimmer. ---
+            if (isReversed)
+            {
+                juce::ColourGradient grad(c.withAlpha(0.15f * alpha), x, barTop,
+                                          c.withAlpha(1.00f * alpha), x, barBot, false);
+                grad.addColour(0.55, c.withAlpha(0.32f * alpha));   // hold dim through the upper half
+                g.setGradientFill(grad);
+            }
+            else
+            {
+                g.setGradientFill(juce::ColourGradient(c.withAlpha(0.95f * alpha), x, barTop,
+                                                       c.withAlpha(0.42f * alpha), x, barBot, false));
+            }
+            g.fillPath(topBar(barW, r));
+
+            //--- bright cap at the value head ---
+            g.setColour(juce::Colours::white.withAlpha(0.30f * alpha));
+            g.fillRoundedRectangle(x - barW * 0.5f, barTop, barW, 2.0f, 1.0f);
         }
 
-        g.setColour(c.withAlpha(0.20f * alpha));
-        float gr = kNodeRadius + 5.0f;
-        g.fillEllipse(x - gr, y - gr, gr * 2.0f, gr * 2.0f);
+        //--- node head: a glossy bead the SAME width as the bar (not a wider ball).  The
+        //    bar's rounded top (radius == nr) sits right under it, so head + bar read as one
+        //    uniform-width fader.  Arrow scaled to fit. ---
+        const float nr = juce::jmax(3.0f, barW * 0.5f);   // bead radius = half the bar width
 
-        g.setColour(c.withAlpha(alpha));
-        g.fillEllipse(x - kNodeRadius, y - kNodeRadius,
-                      kNodeRadius * 2.0f, kNodeRadius * 2.0f);
+        g.setGradientFill(juce::ColourGradient(c.brighter(0.35f).withAlpha(alpha), x, y - nr,
+                                               c.withAlpha(alpha),                 x, y + nr, false));
+        g.fillEllipse(x - nr, y - nr, nr * 2.0f, nr * 2.0f);
+
+        //--- specular highlight (top-centre) ---
+        g.setColour(juce::Colours::white.withAlpha(0.42f * alpha));
+        g.fillEllipse(x - nr * 0.40f, y - nr * 0.74f, nr * 0.80f, nr * 0.40f);
 
         {
-            //--- direction arrow: ◄ for reverse, ► for forward ---
+            //--- direction arrow: ◄ reverse / ► forward — centroid on x, scaled to the bead ---
             juce::Path arrow;
             if (isReversed)
-                arrow.addTriangle(x + 4.0f, y - 4.5f, x - 3.5f, y, x + 4.0f, y + 4.5f);
+                arrow.addTriangle(x + nr*0.45f, y - nr*0.55f, x - nr*0.90f, y, x + nr*0.45f, y + nr*0.55f);
             else
-                arrow.addTriangle(x - 4.0f, y - 4.5f, x + 3.5f, y, x - 4.0f, y + 4.5f);
+                arrow.addTriangle(x - nr*0.45f, y - nr*0.55f, x + nr*0.90f, y, x - nr*0.45f, y + nr*0.55f);
             g.setColour(juce::Colours::white.withAlpha(juce::jmin(1.0f, alpha + 0.15f)));
             g.fillPath(arrow);
         }
@@ -447,8 +540,7 @@ void NodeTimeline::paint(juce::Graphics& g)
         if (selected)
         {
             g.setColour(eg::col::ink.withAlpha(0.85f));
-            g.drawEllipse(x - kNodeRadius - 2.0f, y - kNodeRadius - 2.0f,
-                          (kNodeRadius + 2.0f) * 2.0f, (kNodeRadius + 2.0f) * 2.0f, 1.5f);
+            g.drawEllipse(x - nr - 2.0f, y - nr - 2.0f, (nr + 2.0f) * 2.0f, (nr + 2.0f) * 2.0f, 1.5f);
         }
     };
 
@@ -505,7 +597,7 @@ void NodeTimeline::paint(juce::Graphics& g)
     if (editMode == EditMode::Pan)
     {
         float panCy = panToY(0.0f);
-        g.setColour(juce::Colour(0xffd9cfe4));
+        g.setColour(eg::col::line2);
         g.drawHorizontalLine((int)panCy, kPadX, w - kPadX);
 
         g.setFont(9.0f);
@@ -553,7 +645,7 @@ void NodeTimeline::paint(juce::Graphics& g)
     if (editMode == EditMode::Sat)
     {
         float satBase = satToY(0.0f);
-        g.setColour(juce::Colour(0xffd9cfe4));
+        g.setColour(eg::col::line2);
         g.drawHorizontalLine((int)satBase, kPadX, w - kPadX);
 
         g.setFont(9.0f);
@@ -588,7 +680,7 @@ void NodeTimeline::paint(juce::Graphics& g)
     if (editMode == EditMode::Pitch)
     {
         float pitchCy = pitchToY(0.0f);
-        g.setColour(juce::Colour(0xffd9cfe4));
+        g.setColour(eg::col::line2);
         g.drawHorizontalLine((int)pitchCy, kPadX, w - kPadX);
 
         g.setFont(9.0f);
@@ -651,7 +743,7 @@ void NodeTimeline::paint(juce::Graphics& g)
         auto  str = juce::String((int)std::round(nodes[probTooltipIdx].probability * 100)) + "%";
 
         juce::Rectangle<float> pill(nx - 15.0f, ny - kNodeRadius - 27.0f, 32.0f, 16.0f);
-        g.setColour(eg::col::ink);
+        g.setColour(juce::Colour(0xff141318));   // near-black floating pill (ink is light now)
         g.fillRoundedRectangle(pill, 5.0f);
         g.setColour(juce::Colours::white);
         g.setFont(9.0f);
@@ -1054,7 +1146,9 @@ void NodeTimeline::mouseDrag(const juce::MouseEvent& e)
     //--- dry node: only gain changes (locked to beat 0) ---
     if (dragIndex == -2)
     {
-        processor.dry.gain = yToGain(e.position.y);
+        float g = yToGain(e.position.y);
+        processor.dry.gain  = g;          // immediate for drawing
+        *processor.pDryGain = g;           // host-automatable parameter
         repaint();
         return;
     }

@@ -238,6 +238,130 @@ struct PitchShifter
 };
 
 //==============================================================================
+// FormantContext — shared, stateless FFT workspace handed to every FormantShifter
+// call (the audio thread processes one tap/channel at a time, so a single context is
+// safe to reuse).  Owns nothing; just points at the processor's FFT engine, windows
+// and scratch so the shifter allocates nothing on the audio thread.  Built once in
+// prepareToPlay.
+//==============================================================================
+struct FormantContext
+{
+    juce::dsp::FFT*      fft  = nullptr;
+    const float*         ana  = nullptr;     // analysis window  (size N)
+    const float*         syn  = nullptr;     // synthesis window (size N)
+    float                norm = 1.0f;        // overlap-add (COLA) normalisation
+    std::complex<float>* spec = nullptr;     // size N — holds the spectrum
+    std::complex<float>* work = nullptr;     // size N — transform scratch
+    std::complex<float>* ceps = nullptr;     // size N — cepstrum scratch
+    float*               env  = nullptr;     // size N/2+1 — spectral envelope
+    int                  N      = 0;
+    int                  lifter = 0;         // cepstral lifter cutoff (quefrency bins)
+    float                drama  = 1.0f;      // >1 exaggerates the envelope reshaping
+};
+
+//==============================================================================
+// FormantShifter — frequency-domain FORMANT shifter for ONE channel.  Where the
+// WSOLA PitchShifter detunes (and drags the formants with it), this MOVES the
+// formants — the timbral resonance peaks — while leaving the PITCH put.  That's the
+// Soundtoys-Alterboy-style move, and it's only possible in the frequency domain.
+//   Per STFT frame:  (1) estimate the spectral envelope by cepstral liftering,
+//   (2) warp that envelope along frequency by the formant ratio, (3) re-apply it as a
+//   (warped ÷ original) gain so the harmonics (pitch) stay while the formants slide.
+//   Streaming overlap-add; adds N samples of latency — the caller compensates by
+//   reading the delay buffer N samples earlier, so the plugin's own latency stays 0.
+// Approximate on dense/polyphonic material; vocal-ish mono sources sound best.
+//
+// THREE BY-EAR TUNING KNOBS (all set in the processor, not here):
+//   • kFormantRange  (processBlock, formant branch) — how FAR formants move per ±12
+//                     of the PITCH layer.  1.0 = ±1 octave.  The main "how much" knob.
+//   • FormantContext.drama  (prepareToPlay) — how DEEP the peaks/notches get (1.0 = natural).
+//   • FormantContext.lifter (prepareToPlay) — envelope sharpness (N/12 = present but not ducky).
+//==============================================================================
+struct FormantShifter
+{
+    static constexpr int kOrder = 10;        // FFT order → N = 1024 (~21 ms @ 48k)
+    static constexpr int N      = 1 << kOrder;
+    static constexpr int H      = N / 4;     // hop = 75 % overlap
+
+    float inRing [N] = {};   // most-recent N input samples (circular)
+    float outRing[N] = {};   // overlap-add output accumulator (circular)
+    int   idx      = 0;      // shared read/write head into both rings
+    int   hopCount = 0;
+
+    void reset()
+    {
+        std::fill(inRing,  inRing  + N, 0.0f);
+        std::fill(outRing, outRing + N, 0.0f);
+        idx = 0; hopCount = 0;
+    }
+
+    static constexpr int latency() { return N; }
+
+    //--- push one input sample, pop one (N-samples-old) output sample ---
+    float process(float in, float ratio, const FormantContext& c) noexcept
+    {
+        inRing[idx]     = in;
+        const float out = outRing[idx];
+        outRing[idx]    = 0.0f;
+
+        if (++hopCount >= H) { hopCount = 0; analyseSynthesise(ratio, c); }
+
+        idx = (idx + 1) % N;
+        return out;
+    }
+
+private:
+    void analyseSynthesise(float ratio, const FormantContext& c) noexcept
+    {
+        auto* S = c.spec; auto* W = c.work; auto* C = c.ceps; auto* env = c.env;
+
+        //--- window the last N inputs (oldest sits at idx+1) → spectrum S ---
+        for (int i = 0; i < N; ++i)
+        {
+            const float s = inRing[(idx + 1 + i) % N];
+            W[i] = std::complex<float>(s * c.ana[i], 0.0f);
+        }
+        c.fft->perform(W, S, false);
+
+        //--- spectral envelope via the real cepstrum: IFFT(log|X|), keep the low
+        //    quefrencies (the slow envelope), drop the rest (the pitch harmonics).
+        //    juce::dsp::FFT's inverse is already 1/N-normalised, so no manual scaling. ---
+        for (int k = 0; k < N; ++k)
+            W[k] = std::complex<float>(std::log(std::abs(S[k]) + 1.0e-9f), 0.0f);
+        c.fft->perform(W, C, true);                        // → true cepstrum
+        for (int q = c.lifter + 1; q < N - c.lifter; ++q) C[q] = {};
+        c.fft->perform(C, W, false);                       // → smoothed log-magnitude
+
+        const int half = N / 2;
+        for (int k = 0; k <= half; ++k) env[k] = std::exp(W[k].real());
+
+        //--- warp the envelope by `ratio` (formants up for ratio>1) and re-apply it
+        //    as a real gain; mirror onto the upper half so the output stays real ---
+        for (int k = 0; k <= half; ++k)
+        {
+            const float src = (float)k / ratio;
+            float warped;
+            if      (src <= 0.0f)    warped = env[0];
+            else if (src >= half)    warped = env[half];
+            else { const int i0 = (int)src; const float fr = src - i0;
+                   warped = env[i0] * (1.0f - fr) + env[i0 + 1] * fr; }
+
+            float g = warped / (env[k] + 1.0e-9f);
+            if (c.drama != 1.0f) g = std::pow(g, c.drama);  // drama>1 deepens peaks/notches (1.0 = no-op)
+            g = juce::jlimit(0.0625f, 16.0f, g);            // ±24 dB safety clamp
+            S[k] *= g;
+            if (k > 0 && k < half) S[N - k] *= g;
+        }
+
+        c.fft->perform(S, W, true);                        // → time-domain frame (1/N-normalised)
+
+        //--- synthesis-window + overlap-add back into the output ring ---
+        for (int i = 0; i < N; ++i)
+            outRing[(idx + 1 + i) % N] += W[i].real() * c.syn[i] * c.norm;
+    }
+};
+
+//==============================================================================
 struct DryNode
 {
     float gain = 1.0f;
@@ -328,6 +452,11 @@ public:
     float                 gridLengthBeats = 4.0f;   // total grid length in beats
     float                 snapStepBeats   = 0.25f;  // musical snap step in beats (0.25 = 1/16 note)
 
+    //--- transport position published each block for the editor's grid playhead
+    //    (written on the audio thread, read on the message thread). ---
+    std::atomic<double>   playheadBeats    { 0.0 };  // host song position in beats
+    std::atomic<bool>     transportPlaying { false }; // true while the host transport rolls
+
     //--- filter & mix (editor-writable, audio-thread-read) ---
     float lpCutoffHz  = 20000.0f;  // low-pass  cutoff  (Hz)
     float hpCutoffHz  = 20.0f;     // high-pass cutoff  (Hz)
@@ -352,6 +481,30 @@ public:
     //    Too short eventually can't lock onto low notes. ---
     float pitchGrainMs = 30.0f;
 
+    //--- FORMANT mode (global).  When on, a forward tap's PITCH-layer value warps its
+    //    formants (spectral envelope) instead of detuning it — pitch stays put.  Routed
+    //    to the frequency-domain FormantShifter (per-tap, per-channel) instead of the
+    //    WSOLA PitchShifter.  Approximate on dense material; vocal-ish sources best. ---
+    bool  formantMode = false;
+
+    //--- HOST-AUTOMATABLE PARAMETERS (registered in the ctor via addParameter; this
+    //    AudioProcessor owns them).  The global fields ABOVE are now just an audio-
+    //    thread mirror: processBlock copies each parameter into its field once per
+    //    block, so the DSP body keeps reading the plain fields unchanged.  The editor
+    //    and the inspector/timeline (for the dry node) write these PARAMETERS, never
+    //    the fields — that's what makes them appear + automate in the host. ---
+    juce::AudioParameterFloat* pDrive       = nullptr;   // -> satDrive
+    juce::AudioParameterFloat* pHpCutoff    = nullptr;   // -> hpCutoffHz
+    juce::AudioParameterFloat* pLpCutoff    = nullptr;   // -> lpCutoffHz
+    juce::AudioParameterFloat* pInputDb     = nullptr;   // dB; -> inputGain (linear)
+    juce::AudioParameterFloat* pOutputDb    = nullptr;   // dB; -> outputGain (linear)
+    juce::AudioParameterFloat* pGrainMs     = nullptr;   // -> pitchGrainMs
+    juce::AudioParameterFloat* pDryGain     = nullptr;   // -> dry.gain
+    juce::AudioParameterFloat* pDryPan      = nullptr;   // -> dry.pan
+    juce::AudioParameterBool*  pFilterDry   = nullptr;   // -> filterDry
+    juce::AudioParameterBool*  pGlobalDrive = nullptr;   // -> satGlobalOverride
+    juce::AudioParameterBool*  pFormant     = nullptr;   // -> formantMode
+
 private:
     //--- per-node DSP state (audio thread only).  Reverse needs no per-node
     //    state any more: it's a stateless function of the transport position. ---
@@ -362,6 +515,7 @@ private:
         float     timingJitter = 0.0f;
         TapeStage    tape;       // per-tap SAT: same tape stage as the global drive
         PitchShifter pitch;      // per-tap WSOLA pitch shifter (forward taps only)
+        FormantShifter formant[2]; // per-tap, per-channel FORMANT shifter (formant mode)
     };
 
     void rerollNodes();
@@ -382,6 +536,14 @@ private:
     //--- the GLOBAL tape stage the whole output (dry + echoes) passes through.
     //    Identical DSP to each tap's per-tap TapeStage. ---
     TapeStage globalTape;
+
+    //--- FORMANT shifter shared workspace: one FFT engine + windows + scratch reused
+    //    by every tap/channel (audio thread runs them one at a time).  Built in
+    //    prepareToPlay; the per-tap state lives in NodeState::formant. ---
+    std::unique_ptr<juce::dsp::FFT>   formantFFT;
+    std::vector<std::complex<float>>  formantSpec, formantWork, formantCeps;
+    std::vector<float>                formantAnaWin, formantSynWin, formantEnv;
+    FormantContext                    formantCtx;
 
     //--- free-running song-position counter (beats), used to grid-lock reverse
     //    windows when the host provides no play position. ---

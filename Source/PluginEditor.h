@@ -141,6 +141,9 @@ private:
     juce::Slider driveSlider { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
     PillSwitch   satGlobalBtn;
 
+    //--- formant mode: PITCH layer warps formants instead of detuning ---
+    PillSwitch   formantBtn;
+
     //--- global input / output trim (dB on the knob, linear gain in the processor) ---
     juce::Slider inputSlider  { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };
     juce::Slider outputSlider { juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox };

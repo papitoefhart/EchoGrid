@@ -64,7 +64,8 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
         const juce::ScopedLock sl(processor.getCallbackLock());
         if (idx == -2)
         {
-            processor.dry.gain = val;
+            processor.dry.gain  = val;      // immediate, for the timeline's dry-node draw
+            *processor.pDryGain = val;       // the parameter the host/automation owns
         }
         else if (sel.size() <= 1)
         {
@@ -108,7 +109,8 @@ NodeInspector::NodeInspector(EchoGridProcessor& p, NodeTimeline& t)
         const juce::ScopedLock sl(processor.getCallbackLock());
         if (idx == -2)
         {
-            processor.dry.pan = val;
+            processor.dry.pan  = val;
+            *processor.pDryPan = val;
         }
         else if (sel.size() <= 1)
         {
@@ -352,30 +354,43 @@ void NodeInspector::resized()
 //==============================================================================
 void NodeInspector::paint(juce::Graphics& g)
 {
-    //--- white rounded card (corners unpainted so the editor's soft shadow shows) ---
+    //--- dark rounded card (corners unpainted so the editor's soft shadow shows) ---
     auto panelR = getLocalBounds().toFloat().reduced(0.5f);
     g.setColour(eg::col::surface);
     g.fillRoundedRectangle(panelR, eg::kPanelRadius);
+    eg::strokeCardBorder(g, panelR);
+
+    //--- brand logo: lives in the left space beside the knobs (moved here from the
+    //    editor's top-left corner), sized to fill it.  "echo" off-white, "grid" lilac. ---
+    {
+        juce::Font bf(32.0f, juce::Font::bold);
+        g.setFont(bf);
+        const int lx = 24, ly = (getHeight() - 44) / 2;   // vertically centre the logo block
+        g.setColour(eg::col::brand);
+        g.drawText("echo", lx, ly, 140, 36, juce::Justification::left, false);
+        const int ew = (int)bf.getStringWidthFloat("echo");
+        g.setColour(eg::col::lilacDeep);
+        g.drawText("grid", lx + ew, ly, 140, 36, juce::Justification::left, false);
+
+        g.setColour(eg::col::ink3);
+        g.setFont(juce::Font(9.0f));
+        g.drawText("MULTI-TAP DELAY   v" + eg::kVersionLabel + " ALPHA", lx + 2, ly + 35, 220, 12,
+                   juce::Justification::left, false);
+    }
+
+    //--- separator between the brand and the controls (always shown) ---
     g.setColour(eg::col::line);
-    g.drawRoundedRectangle(panelR, eg::kPanelRadius, 1.0f);
+    g.drawLine(206.0f, 18.0f, 206.0f, (float)getHeight() - 18.0f, 1.0f);
 
     int idx = timeline.getSelectedIndex();
 
+    //--- nothing selected: the dimmed knobs already read as "inactive", so just stop
+    //    here (no hint text — it would collide with the ghosted knobs) ---
     if (idx == -1)
-    {
-        g.setColour(eg::col::ink3);
-        g.setFont(11.0f);
-        g.drawText("Click a tap to inspect", 16, getHeight() / 2 - 6, 240, 14,
-                   juce::Justification::centredLeft, false);
         return;
-    }
 
     bool isEcho = (idx >= 0 && idx < (int)processor.nodes.size());
     bool isRev  = (isEcho && processor.nodes[idx].reverse);
-
-    //--- separator between hero and controls ---
-    g.setColour(eg::col::line);
-    g.drawLine(206.0f, 18.0f, 206.0f, (float)getHeight() - 18.0f, 1.0f);
 
     //--- section labels above each control ---
     g.setColour(eg::col::ink3);
@@ -460,8 +475,8 @@ void NodeInspector::syncFromProcessor(int idx)
     if (isDry)
     {
         nodeLabel.setText("DRY", juce::dontSendNotification);
-        gainSlider.setValue(processor.dry.gain, juce::dontSendNotification);
-        panSlider.setValue(processor.dry.pan,   juce::dontSendNotification);
+        gainSlider.setValue(processor.pDryGain->get(), juce::dontSendNotification);
+        panSlider.setValue(processor.pDryPan->get(),   juce::dontSendNotification);
     }
     else if (isEcho)
     {

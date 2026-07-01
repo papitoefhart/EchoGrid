@@ -1,7 +1,5 @@
 #include "PluginEditor.h"
 
-static const juce::String kVersionLabel = "0.51";
-
 //==============================================================================
 // Musical subdivision options — label shown on the tab, beats = snap step in beats.
 // Count must match EchoGridEditor::kNumSubdivs.
@@ -65,8 +63,8 @@ void EchoGridLAF::drawRotarySlider(juce::Graphics& g, int x, int y, int w, int h
     //--- soft cap ---
     const float capR = arcR - lineW - 2.0f;
     juce::Rectangle<float> cap(cx - capR, cy - capR, capR * 2.0f, capR * 2.0f);
-    g.setGradientFill(juce::ColourGradient(juce::Colours::white, cx, cy - capR,
-                                           juce::Colour(0xfff3eef6), cx, cy + capR, false));
+    g.setGradientFill(juce::ColourGradient(eg::col::raised,        cx, cy - capR,
+                                           juce::Colour(0xff26262c), cx, cy + capR, false));
     g.fillEllipse(cap);
     g.setColour(eg::col::line2);
     g.drawEllipse(cap, 1.0f);
@@ -83,7 +81,7 @@ void EchoGridLAF::drawComboBox(juce::Graphics& g, int w, int h, bool /*isDown*/,
                                int, int, int, int, juce::ComboBox& box)
 {
     auto r = juce::Rectangle<float>(0.0f, 0.0f, (float)w, (float)h).reduced(0.5f);
-    g.setColour(eg::col::panel);
+    g.setColour(eg::col::raised);
     g.fillRoundedRectangle(r, 9.0f);
     g.setColour(box.hasKeyboardFocus(true) ? eg::col::lilac : eg::col::line2);
     g.drawRoundedRectangle(r, 9.0f, 1.0f);
@@ -129,7 +127,7 @@ void EchoGridLAF::drawButtonBackground(juce::Graphics& g, juce::Button& b,
     }
     else
     {
-        g.setColour(over ? eg::col::lilacSoft.withAlpha(0.35f) : eg::col::panel);
+        g.setColour(over ? eg::col::lilacSoft.withAlpha(0.35f) : eg::col::raised);
         g.fillRoundedRectangle(r, radius);
         g.setColour(eg::col::line2);
         g.drawRoundedRectangle(r, radius, 1.0f);
@@ -173,7 +171,7 @@ void UndoArrowButton::paintButton(juce::Graphics& g, bool mouseOver, bool isDown
 
     g.setColour(isDown    ? eg::col::lilacSoft :
                 mouseOver ? eg::col::line :
-                            eg::col::panel);
+                            eg::col::raised);
     g.fillRoundedRectangle(b, 8.0f);
     g.setColour(eg::col::line2);
     g.drawRoundedRectangle(b, 8.0f, 1.0f);
@@ -354,38 +352,45 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
 
     //--- HP / LP filter knobs (blue) ---
     hpSlider.setNormalisableRange(juce::NormalisableRange<double>(20.0, 8000.0, 1.0, 0.35));
-    hpSlider.setValue(p.hpCutoffHz, juce::dontSendNotification);
+    hpSlider.setValue(p.pHpCutoff->get(), juce::dontSendNotification);
     hpSlider.setDoubleClickReturnValue(true, 20.0);
     hpSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::blue);
-    hpSlider.onValueChange = [this] { processorRef.hpCutoffHz = (float)hpSlider.getValue(); };
+    hpSlider.onValueChange = [this] { *processorRef.pHpCutoff = (float)hpSlider.getValue(); };
     addAndMakeVisible(hpSlider);
 
     lpSlider.setNormalisableRange(juce::NormalisableRange<double>(200.0, 20000.0, 1.0, 0.35));
-    lpSlider.setValue(p.lpCutoffHz, juce::dontSendNotification);
+    lpSlider.setValue(p.pLpCutoff->get(), juce::dontSendNotification);
     lpSlider.setDoubleClickReturnValue(true, 20000.0);
     lpSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::blue);
-    lpSlider.onValueChange = [this] { processorRef.lpCutoffHz = (float)lpSlider.getValue(); };
+    lpSlider.onValueChange = [this] { *processorRef.pLpCutoff = (float)lpSlider.getValue(); };
     addAndMakeVisible(lpSlider);
 
     //--- filter-dry toggle (blue, filter section) ---
     filterDryBtn.setOnColour(eg::col::blue);
-    filterDryBtn.onClick = [this] { processorRef.filterDry = filterDryBtn.getToggleState(); };
+    filterDryBtn.onClick = [this] { *processorRef.pFilterDry = filterDryBtn.getToggleState(); };
     addAndMakeVisible(filterDryBtn);
 
     //--- global tape DRIVE knob (pink) ---
     driveSlider.setRange(0.0, 1.0, 0.01);
-    driveSlider.setValue(p.satDrive, juce::dontSendNotification);
+    driveSlider.setValue(p.pDrive->get(), juce::dontSendNotification);
     driveSlider.setDoubleClickReturnValue(true, 0.0);
     driveSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::pink);
     driveSlider.setTooltip("Tape drive on the whole output (dry + echoes). Active only when GLOBAL tape is on; otherwise use each tap's SAT slider.");
-    driveSlider.onValueChange = [this] { processorRef.satDrive = (float)driveSlider.getValue(); };
+    driveSlider.onValueChange = [this] { *processorRef.pDrive = (float)driveSlider.getValue(); };
     addAndMakeVisible(driveSlider);
 
     //--- GLOBAL tape toggle (pink) ---
     satGlobalBtn.setOnColour(eg::col::pink);
     satGlobalBtn.setTooltip("Ignore each tap's own drive; drive everything with the DRIVE knob");
-    satGlobalBtn.onClick = [this] { processorRef.satGlobalOverride = satGlobalBtn.getToggleState(); };
+    satGlobalBtn.onClick = [this] { *processorRef.pGlobalDrive = satGlobalBtn.getToggleState(); };
     addAndMakeVisible(satGlobalBtn);
+
+    //--- FORMANT toggle (green = PITCH layer).  On = the PITCH layer warps each tap's
+    //    formants/timbre instead of detuning it; pitch stays put. ---
+    formantBtn.setOnColour(eg::col::green);
+    formantBtn.setTooltip("FORMANT: the PITCH layer shifts each tap's formants (timbre/character), keeping its pitch. Off = normal pitch shift. Approximate; vocal-ish sources work best.");
+    formantBtn.onClick = [this] { *processorRef.pFormant = formantBtn.getToggleState(); };
+    addAndMakeVisible(formantBtn);
 
     //--- global INPUT / OUTPUT trim knobs (lilac = level).  Knob is in dB (±24,
     //    0 = unity); the processor stores the linear gain. ---
@@ -393,34 +398,31 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
     //    (0 gain), not −24 dB — so "turned all the way down" is completely silent.
     //    Using −24 as the minus-infinity point makes decibelsToGain(−24,−24)==0 and
     //    gainToDecibels(0,−24)==−24 round-trip cleanly. ---
-    auto setupGainKnob = [this](juce::Slider& s, float linearGain,
-                                std::function<void(float)> setter, const juce::String& tip)
+    auto setupGainKnob = [this](juce::Slider& s, juce::AudioParameterFloat* param,
+                                const juce::String& tip)
     {
         s.setNormalisableRange(juce::NormalisableRange<double>(-24.0, 24.0, 0.1));
-        s.setValue(juce::Decibels::gainToDecibels(linearGain, -24.0f), juce::dontSendNotification);
+        s.setValue(param->get(), juce::dontSendNotification);   // parameter is already in dB
         s.setDoubleClickReturnValue(true, 0.0);
         s.setColour(juce::Slider::rotarySliderFillColourId, eg::col::lilac);
         s.setTextValueSuffix(" dB");
         s.setTooltip(tip);
-        s.onValueChange = [&s, setter]
-            { setter(juce::Decibels::decibelsToGain((float)s.getValue(), -24.0f)); };
+        s.onValueChange = [&s, param] { *param = (float)s.getValue(); };
         addAndMakeVisible(s);
     };
-    setupGainKnob(inputSlider,  p.inputGain,
-                  [this](float g){ processorRef.inputGain  = g; },
+    setupGainKnob(inputSlider,  p.pInputDb,
                   "Input gain into the whole effect (also sets how hard saturation is driven)");
-    setupGainKnob(outputSlider, p.outputGain,
-                  [this](float g){ processorRef.outputGain = g; },
+    setupGainKnob(outputSlider, p.pOutputDb,
                   "Output gain - final level after the whole chain");
 
     //--- pitch-shift GRAIN length knob (ms) — temporary control for ear-tuning the
     //    pitch quality; live value drawn under the knob so it can be read back ---
     grainSlider.setRange(15.0, 100.0, 1.0);
-    grainSlider.setValue(p.pitchGrainMs, juce::dontSendNotification);
+    grainSlider.setValue(p.pGrainMs->get(), juce::dontSendNotification);
     grainSlider.setDoubleClickReturnValue(true, 30.0);
     grainSlider.setColour(juce::Slider::rotarySliderFillColourId, eg::col::green);
     grainSlider.setTooltip("Pitch-shift grain length (ms). Shorter = tighter but more warble; longer = smoother but more smear. Tune by ear and tell me the value.");
-    grainSlider.onValueChange = [this] { processorRef.pitchGrainMs = (float)grainSlider.getValue(); repaint(); };
+    grainSlider.onValueChange = [this] { *processorRef.pGrainMs = (float)grainSlider.getValue(); repaint(); };
     addAndMakeVisible(grainSlider);
 
     addAndMakeVisible(timeline);
@@ -434,7 +436,7 @@ EchoGridEditor::EchoGridEditor(EchoGridProcessor& p)
     setResizable(true, true);
     setResizeLimits(860, 560, 1600, 900);   // min height fits the IN/OUT row in the global panel
     setSize(1040, 600);
-    startTimerHz(10);
+    startTimerHz(30);   // 30 Hz so the grid playhead steps smoothly; repaints stay gated
     updateGridButtons();
 }
 
@@ -451,30 +453,32 @@ void EchoGridEditor::timerCallback()
         if (std::abs((float)s.getValue() - v) > 0.001f)
             s.setValue(v, juce::dontSendNotification);
     };
-    syncf(grainSlider,  processorRef.pitchGrainMs);
-    syncf(hpSlider,     processorRef.hpCutoffHz);
-    syncf(lpSlider,     processorRef.lpCutoffHz);
-    syncf(driveSlider,  processorRef.satDrive);
-    //--- gain knobs are in dB but the processor holds linear gain (−24 dB = mute) ---
-    auto syncGain = [](juce::Slider& s, float linear) {
-        float dB = juce::Decibels::gainToDecibels(linear, -24.0f);
-        if (std::abs((float)s.getValue() - dB) > 0.01f)
-            s.setValue(dB, juce::dontSendNotification);
-    };
-    syncGain(inputSlider,  processorRef.inputGain);
-    syncGain(outputSlider, processorRef.outputGain);
-    filterDryBtn.setToggleState(processorRef.filterDry,          juce::dontSendNotification);
-    satGlobalBtn.setToggleState(processorRef.satGlobalOverride,  juce::dontSendNotification);
+    //--- reflect parameter values (host automation / preset loads) back onto the
+    //    knobs.  IN/OUT sliders and their parameters are both in dB now. ---
+    syncf(grainSlider,  processorRef.pGrainMs->get());
+    syncf(hpSlider,     processorRef.pHpCutoff->get());
+    syncf(lpSlider,     processorRef.pLpCutoff->get());
+    syncf(driveSlider,  processorRef.pDrive->get());
+    syncf(inputSlider,  processorRef.pInputDb->get());
+    syncf(outputSlider, processorRef.pOutputDb->get());
+    filterDryBtn.setToggleState(processorRef.pFilterDry->get(),    juce::dontSendNotification);
+    satGlobalBtn.setToggleState(processorRef.pGlobalDrive->get(),  juce::dontSendNotification);
+    formantBtn.setToggleState(processorRef.pFormant->get(),        juce::dontSendNotification);
 
     updateGridButtons();
+
+    //--- step-sequencer playhead: feed the host transport position to the timeline, which
+    //    snaps it to a subdivision cell and repaints only when that cell changes ---
+    timeline.setPlayhead(processorRef.playheadBeats.load(std::memory_order_relaxed),
+                         processorRef.transportPlaying.load(std::memory_order_relaxed));
 
     //--- repaint only on real changes (e.g. host loaded a preset).  The editor's own
     //    paint draws the live GRAIN ms readout; the timeline draws the grid.  This used
     //    to repaint the WHOLE editor 10x/sec unconditionally (re-rendering ~40 drop
     //    shadows each time) — the main cause of the sluggish, laggy feel. ---
-    if (std::abs(lastGrainMs - processorRef.pitchGrainMs) > 1.0e-6f)
+    if (std::abs(lastGrainMs - processorRef.pGrainMs->get()) > 1.0e-6f)
     {
-        lastGrainMs = processorRef.pitchGrainMs;
+        lastGrainMs = processorRef.pGrainMs->get();
         repaint();
     }
     if (std::abs(lastGridLen  - processorRef.gridLengthBeats) > 1.0e-6f
@@ -519,20 +523,36 @@ void EchoGridEditor::paint(juce::Graphics& g)
 {
     g.fillAll(eg::col::windowBg);
 
-    //--- brand ---
-    juce::Font bf(20.0f, juce::Font::bold);
-    g.setFont(bf);
-    const float bx = 18.0f, byTop = 16.0f;
-    g.setColour(eg::col::ink);
-    g.drawText("echo", (int)bx, (int)byTop, 80, 24, juce::Justification::left, false);
-    const float ew = bf.getStringWidthFloat("echo");
-    g.setColour(eg::col::lilacDeep);
-    g.drawText("grid", (int)(bx + ew), (int)byTop, 80, 24, juce::Justification::left, false);
+    //--- (brand logo now lives in the inspector's left space, not the top-left corner) ---
 
-    g.setColour(eg::col::ink3);
-    g.setFont(8.5f);
-    g.drawText("MULTI-TAP DELAY", (int)bx, 41, 130, 10, juce::Justification::left, false);
-    g.drawText("v" + kVersionLabel, (int)bx, 2, 60, 10, juce::Justification::left, false);
+    //--- alpha-test shortcut hints: two columns (action | "= description") so the "="
+    //    signs line up.  Left edge kept just right of the LAYER tabs; the block is
+    //    vertically centred between the window's top edge and the top of the fader panel. ---
+    {
+        const int x0 = timelineArea.getX() + 274;        // moved a bit right
+        const char* acts[]  = { "Double-click a fader", "Right-click a fader",
+                                "Mouse-wheel on fader", "Shift + click-drag", "Opt + click-drag" };
+        const char* descs[] = { "toggle reverse", "delete it", "probability",
+                                "select multiple faders", "draw in faders" };
+        const int n = 5, lh = 13;
+
+        juce::Font f(12.0f);
+        g.setFont(f);
+        float aw = 0.0f;
+        for (auto* a : acts) aw = juce::jmax(aw, f.getStringWidthFloat(a));
+        const int colX = x0 + (int)aw + 18;              // shared "=" column
+        const int dw   = juce::jmax(0, (timelineArea.getRight() - 190) - colX);
+        const int top  = (timelineArea.getY() - n * lh) / 2;   // centred in the top strip
+
+        g.setColour(eg::col::ink2);
+        for (int i = 0; i < n; ++i)
+        {
+            const int y = top + i * lh;
+            g.drawText(acts[i], x0, y, (int)aw + 4, lh, juce::Justification::centredLeft, false);
+            g.drawText(juce::String("=  ") + descs[i], colX, y, dw, lh,
+                       juce::Justification::centredLeft, false);
+        }
+    }
 
     //--- all static drop-shadows (timeline, inspector, guide-card tabs, undo/redo
     //    arrows, global panel) are pre-rendered once into shadowCache in resized() and
@@ -545,8 +565,7 @@ void EchoGridEditor::paint(juce::Graphics& g)
     //    the knobs/pills are child controls) ---
     g.setColour(eg::col::panel);
     g.fillRoundedRectangle(globalArea.toFloat(), eg::kPanelRadius);
-    g.setColour(eg::col::line);
-    g.drawRoundedRectangle(globalArea.toFloat(), eg::kPanelRadius, 1.0f);
+    eg::strokeCardBorder(g, globalArea.toFloat());
 
     //--- GLOBAL section header: icon chip + uppercase label ---
     {
@@ -583,7 +602,7 @@ void EchoGridEditor::paint(juce::Graphics& g)
                grainSlider.getWidth() + 20, 12, juce::Justification::centred, false);
     g.setColour(eg::col::ink3);
     g.setFont(9.0f);
-    g.drawText(juce::String((int)std::round(processorRef.pitchGrainMs)) + " ms",
+    g.drawText(juce::String((int)std::round(processorRef.pGrainMs->get())) + " ms",
                grainSlider.getX() - 10, grainSlider.getBottom() + 13,
                grainSlider.getWidth() + 20, 11, juce::Justification::centred, false);
 
@@ -596,6 +615,7 @@ void EchoGridEditor::paint(juce::Graphics& g)
     };
     pillLabel(filterDryBtn, "Filter dry");
     pillLabel(satGlobalBtn, "Global drive");
+    pillLabel(formantBtn,   "Formant");
 }
 
 //==============================================================================
@@ -677,13 +697,15 @@ void EchoGridEditor::resized()
     driveSlider.setBounds (innerX        + (colW - ks2) / 2, ky2, ks2, ks2);
     grainSlider.setBounds (innerX + colW + (colW - 48)  / 2, ky2 + 4, 48, 48);
 
+    //--- +30 (was +14) so the pill row clears the GRAIN knob's "x ms" readout below it ---
     int ty = ky2 + ks2 + 30;
-    const int pillW = 42, pillH = 24;
-    filterDryBtn.setBounds(globalArea.getRight() - 16 - pillW, ty,      pillW, pillH);
-    satGlobalBtn.setBounds(globalArea.getRight() - 16 - pillW, ty + 34, pillW, pillH);
+    const int pillW = 42, pillH = 24, pillGap = 26;
+    filterDryBtn.setBounds(globalArea.getRight() - 16 - pillW, ty,               pillW, pillH);
+    satGlobalBtn.setBounds(globalArea.getRight() - 16 - pillW, ty + pillGap,     pillW, pillH);
+    formantBtn.setBounds  (globalArea.getRight() - 16 - pillW, ty + 2 * pillGap, pillW, pillH);
 
     //--- IN / OUT trim row at the bottom of the panel ---
-    int ky3 = ty + 34 + pillH + 22;
+    int ky3 = ty + 2 * pillGap + pillH + 14;
     int ks3 = 50;
     inputSlider.setBounds (innerX        + (colW - ks3) / 2, ky3, ks3, ks3);
     outputSlider.setBounds(innerX + colW + (colW - ks3) / 2, ky3, ks3, ks3);
@@ -714,8 +736,8 @@ void EchoGridEditor::rebuildShadowCache()
     {
         juce::Path pth;
         pth.addRoundedRectangle(b.toFloat(), 8.0f);
-        juce::DropShadow(juce::Colour(0x336a4f86), 12, { 0, 4 }).drawForPath(sg, pth);
-        juce::DropShadow(juce::Colour(0x22473159),  5, { 0, 2 }).drawForPath(sg, pth);
+        juce::DropShadow(juce::Colour(0x4d000000), 11, { 0, 4 }).drawForPath(sg, pth);
+        juce::DropShadow(juce::Colour(0x40000000),  5, { 0, 2 }).drawForPath(sg, pth);
     };
     for (auto& t : layerTabs)  softShadow(t.getBounds());
     for (auto& t : beatBtns)   softShadow(t.getBounds());

@@ -2,18 +2,18 @@
 #include <JuceHeader.h>
 
 //==============================================================================
-// EchoGrid visual theme — the "modern / calm" pastel palette (v0.25 overhaul).
-// Lilac primary, pink = Sat/Drive, blue = Pan/filters, anthracite for all text.
-// Shared by PluginEditor, NodeTimeline and NodeInspector so colours stay in sync.
+// EchoGrid visual theme — DARK dashboard (v0.59): anthracite canvas, dark cards,
+// off-white text, pastel accents (lilac = gain, pink = sat/drive, blue = pan/filters,
+// green = pitch).  Shared by PluginEditor, NodeTimeline and NodeInspector.
 //==============================================================================
 namespace eg
 {
 namespace col
 {
-    //--- text (anthracite) ---
-    const juce::Colour ink   { 0xff33333a };   // all words
-    const juce::Colour ink2  { 0xff87838d };   // secondary labels
-    const juce::Colour ink3  { 0xffb4afba };   // faint labels / hints
+    //--- text (light on the dark cards) ---
+    const juce::Colour ink   { 0xffe8e5ee };   // all words (off-white)
+    const juce::Colour ink2  { 0xffa7a2b1 };   // secondary labels
+    const juce::Colour ink3  { 0xff726e7b };   // faint labels / hints
 
     //--- primary (gain / level) ---
     const juce::Colour lilac     { 0xffc2a4d6 };
@@ -28,41 +28,59 @@ namespace col
     const juce::Colour green     { 0xff7cc79a };   // pitch (soft green): knob fill + label + deep dot
     const juce::Colour greenSoft { 0xffcdeede };   // pale green: unison dot / soft fills
 
-    //--- surfaces ---
+    //--- surfaces (dark dashboard: cards float a step lighter than the canvas,
+    //    controls a step lighter again) ---
     const juce::Colour shadow   { 0xffc2a4d6 };    // (legacy offset block — kept for reference)
-    const juce::Colour windowBg { 0xfff3edf6 };    // editor background
-    const juce::Colour surface  { 0xfffffdff };    // plugin card
-    const juce::Colour panel    { 0xffffffff };    // panel cards
-    const juce::Colour line     { 0xffefeaf3 };    // borders
-    const juce::Colour line2    { 0xffe7e0ee };    // stronger borders / knob track
-    const juce::Colour chip     { 0xfff7f3f9 };    // readout / chip fills
-    const juce::Colour iconBg   { 0xfff6f1f8 };    // section-header icon square
+    const juce::Colour windowBg { 0xff1e1e1e };    // editor canvas (anthracite — VS Code dark)
+    const juce::Colour brand    { 0xfff0eef2 };    // off-white logo text on the dark canvas
+    const juce::Colour surface  { 0xff2a2a31 };    // plugin card (elevated off the canvas)
+    const juce::Colour panel    { 0xff2a2a31 };    // panel cards (same elevation as surface)
+    const juce::Colour raised   { 0xff343039 };    // raised controls: buttons, combos, knob caps
+    const juce::Colour line     { 0xff3a3942 };    // subtle borders
+    const juce::Colour line2    { 0xff54525e };    // stronger borders / knob track
+    const juce::Colour chip     { 0xff232228 };    // readout / chip fills (inset)
+    const juce::Colour iconBg   { 0xff343039 };    // section-header icon square
 }
 
 //--- shared card geometry ---
 inline constexpr float kPanelRadius = 18.0f;
 
-//--- soft diffuse drop shadow (dashboard look) — a blurred lilac-anthracite halo
-//    behind a rounded card.  Replaces the old flat offset second-colour block. ---
+//--- version label shown under the brand logo (bump each build the user ear-tests) ---
+inline const juce::String kVersionLabel = "0.71";
+
+//--- soft diffuse drop shadow (dashboard look) — a blurred BLACK shadow below/around a
+//    rounded card so it lifts off the dark canvas.  (Was a lilac halo for the old light
+//    theme; on the anthracite canvas that read as a purple glow, so it's black now.) ---
 inline void drawSoftShadow(juce::Graphics& g, juce::Rectangle<float> r,
                            float radius = kPanelRadius)
 {
     juce::Path p;
     p.addRoundedRectangle(r, radius);
-    //--- two stacked passes: a soft wide halo + a tighter contact shadow ---
-    juce::DropShadow(juce::Colour(0x3a6a4f86), 26, { 0, 12 }).drawForPath(g, p);
-    juce::DropShadow(juce::Colour(0x22473159),  8, { 0, 3  }).drawForPath(g, p);
+    //--- two stacked passes: a soft wide cast + a tighter contact shadow ---
+    juce::DropShadow(juce::Colour(0x59000000), 24, { 0, 10 }).drawForPath(g, p);
+    juce::DropShadow(juce::Colour(0x66000000),  8, { 0, 4  }).drawForPath(g, p);
 }
 
-//--- white rounded card sitting on a soft drop shadow ---
+//--- raised-card border: a 1px stroke lit at the top and shaded at the bottom, so the
+//    card reads as a panel catching light from above (pairs with the dark drop-shadow) ---
+inline void strokeCardBorder(juce::Graphics& g, juce::Rectangle<float> r,
+                             float radius = kPanelRadius)
+{
+    juce::Path p;
+    p.addRoundedRectangle(r, radius);
+    g.setGradientFill(juce::ColourGradient(juce::Colour(0xff54515f), r.getCentreX(), r.getY(),
+                                           juce::Colour(0xff232228), r.getCentreX(), r.getBottom(), false));
+    g.strokePath(p, juce::PathStrokeType(1.0f));
+}
+
+//--- dark rounded card sitting on a soft drop shadow, with a raised top-lit border ---
 inline void drawSoftPanel(juce::Graphics& g, juce::Rectangle<float> r,
                           float radius = kPanelRadius)
 {
     drawSoftShadow(g, r, radius);
-    g.setColour(col::panel);
+    g.setColour(col::surface);
     g.fillRoundedRectangle(r, radius);
-    g.setColour(col::line);
-    g.drawRoundedRectangle(r, radius, 1.0f);
+    strokeCardBorder(g, r, radius);
 }
 
 //--- small lucide-style "sliders" glyph for section headers (stroked in current colour) ---

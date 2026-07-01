@@ -21,6 +21,38 @@ EchoGridProcessor::EchoGridProcessor()
     nodes.push_back(makeNode(1.0f, 0.70f,  0.0f));
     nodes.push_back(makeNode(2.0f, 0.50f,  0.5f));
     nodes.push_back(makeNode(3.0f, 0.30f, -0.5f));
+
+    //--- register host-automatable parameters for the global controls.  addParameter
+    //    transfers ownership to the AudioProcessor; we keep raw typed pointers for
+    //    fast audio-thread reads (->get()) and direct UI writes (*p = value).  IDs
+    //    carry a version hint so saved automation stays stable across builds. ---
+    addParameter(pDrive    = new juce::AudioParameterFloat(
+        juce::ParameterID{ "drive", 1 }, "Drive", 0.0f, 1.0f, 0.0f));
+    addParameter(pHpCutoff = new juce::AudioParameterFloat(
+        juce::ParameterID{ "hpCutoff", 1 }, "HP Cutoff",
+        juce::NormalisableRange<float>(20.0f, 8000.0f, 1.0f, 0.35f), 20.0f));
+    addParameter(pLpCutoff = new juce::AudioParameterFloat(
+        juce::ParameterID{ "lpCutoff", 1 }, "LP Cutoff",
+        juce::NormalisableRange<float>(200.0f, 20000.0f, 1.0f, 0.35f), 20000.0f));
+    addParameter(pInputDb  = new juce::AudioParameterFloat(
+        juce::ParameterID{ "inputGain", 1 }, "Input",
+        juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f));
+    addParameter(pOutputDb = new juce::AudioParameterFloat(
+        juce::ParameterID{ "outputGain", 1 }, "Output",
+        juce::NormalisableRange<float>(-24.0f, 24.0f, 0.1f), 0.0f));
+    addParameter(pGrainMs  = new juce::AudioParameterFloat(
+        juce::ParameterID{ "grainMs", 1 }, "Pitch Grain",
+        juce::NormalisableRange<float>(15.0f, 100.0f, 1.0f), 30.0f));
+    addParameter(pDryGain  = new juce::AudioParameterFloat(
+        juce::ParameterID{ "dryGain", 1 }, "Dry Level", 0.0f, 1.0f, 1.0f));
+    addParameter(pDryPan   = new juce::AudioParameterFloat(
+        juce::ParameterID{ "dryPan", 1 }, "Dry Pan", -1.0f, 1.0f, 0.0f));
+    addParameter(pFilterDry   = new juce::AudioParameterBool(
+        juce::ParameterID{ "filterDry", 1 }, "Filter Dry", false));
+    addParameter(pGlobalDrive = new juce::AudioParameterBool(
+        juce::ParameterID{ "globalDrive", 1 }, "Global Drive", false));
+    addParameter(pFormant     = new juce::AudioParameterBool(
+        juce::ParameterID{ "formantMode", 1 }, "Formant Mode", false));
 }
 
 EchoGridProcessor::~EchoGridProcessor() {}
@@ -43,19 +75,23 @@ void EchoGridProcessor::getStateInformation(juce::MemoryBlock& destData)
     juce::XmlElement root("EchoGrid");
 
     //--- global ---
-    root.setAttribute("dryGain",          (double)dry.gain);
-    root.setAttribute("dryPan",           (double)dry.pan);
+    //--- global controls are parameters now; persist their current values under the
+    //    SAME attribute names as before so older presets/projects stay compatible.
+    //    IN/OUT stay stored as LINEAR gain (back-compat) even though the param is dB. ---
+    root.setAttribute("dryGain",          (double)pDryGain->get());
+    root.setAttribute("dryPan",           (double)pDryPan->get());
     root.setAttribute("analogAmount",     (double)analogAmount);
     root.setAttribute("gridLengthBeats",  (double)gridLengthBeats);
     root.setAttribute("snapStepBeats",    (double)snapStepBeats);
-    root.setAttribute("lpCutoffHz",       (double)lpCutoffHz);
-    root.setAttribute("hpCutoffHz",       (double)hpCutoffHz);
-    root.setAttribute("filterDry",        filterDry);
-    root.setAttribute("satDrive",         (double)satDrive);
-    root.setAttribute("satGlobalOverride", satGlobalOverride);
-    root.setAttribute("inputGain",        (double)inputGain);
-    root.setAttribute("outputGain",       (double)outputGain);
-    root.setAttribute("pitchGrainMs",     (double)pitchGrainMs);
+    root.setAttribute("lpCutoffHz",       (double)pLpCutoff->get());
+    root.setAttribute("hpCutoffHz",       (double)pHpCutoff->get());
+    root.setAttribute("filterDry",        pFilterDry->get());
+    root.setAttribute("satDrive",         (double)pDrive->get());
+    root.setAttribute("satGlobalOverride", pGlobalDrive->get());
+    root.setAttribute("inputGain",        (double)juce::Decibels::decibelsToGain(pInputDb->get(),  -24.0f));
+    root.setAttribute("outputGain",       (double)juce::Decibels::decibelsToGain(pOutputDb->get(), -24.0f));
+    root.setAttribute("pitchGrainMs",     (double)pGrainMs->get());
+    root.setAttribute("formantMode",      pFormant->get());
 
     //--- echo nodes ---
     for (const auto& n : nodes)
@@ -81,18 +117,22 @@ void EchoGridProcessor::setStateInformation(const void* data, int sizeInBytes)
     auto xml = getXmlFromBinary(data, sizeInBytes);
     if (!xml || !xml->hasTagName("EchoGrid")) return;
 
-    dry.gain         = (float)xml->getDoubleAttribute("dryGain",         1.0);
-    dry.pan          = (float)xml->getDoubleAttribute("dryPan",          0.0);
-    analogAmount     = (float)xml->getDoubleAttribute("analogAmount",    0.0);
-    gridLengthBeats  = (float)xml->getDoubleAttribute("gridLengthBeats", 4.0);
-    lpCutoffHz       = (float)xml->getDoubleAttribute("lpCutoffHz",      20000.0);
-    hpCutoffHz       = (float)xml->getDoubleAttribute("hpCutoffHz",      20.0);
-    filterDry        = xml->getBoolAttribute("filterDry", false);
-    satDrive          = (float)xml->getDoubleAttribute("satDrive", 0.0);
-    satGlobalOverride = xml->getBoolAttribute("satGlobalOverride", false);
-    inputGain         = (float)xml->getDoubleAttribute("inputGain",  1.0);
-    outputGain        = (float)xml->getDoubleAttribute("outputGain", 1.0);
-    pitchGrainMs      = (float)xml->getDoubleAttribute("pitchGrainMs", 30.0);
+    //--- restore the global controls into their PARAMETERS from the same attributes
+    //    (older builds saved these exact keys).  IN/OUT were stored LINEAR → convert
+    //    back to the dB the parameter uses.  Non-parameter fields stay direct. ---
+    *pDryGain      = (float)xml->getDoubleAttribute("dryGain", 1.0);
+    *pDryPan       = (float)xml->getDoubleAttribute("dryPan",  0.0);
+    analogAmount   = (float)xml->getDoubleAttribute("analogAmount",    0.0);
+    gridLengthBeats= (float)xml->getDoubleAttribute("gridLengthBeats", 4.0);
+    *pLpCutoff     = (float)xml->getDoubleAttribute("lpCutoffHz", 20000.0);
+    *pHpCutoff     = (float)xml->getDoubleAttribute("hpCutoffHz", 20.0);
+    *pFilterDry    = xml->getBoolAttribute("filterDry", false);
+    *pDrive        = (float)xml->getDoubleAttribute("satDrive", 0.0);
+    *pGlobalDrive  = xml->getBoolAttribute("satGlobalOverride", false);
+    *pInputDb      = juce::Decibels::gainToDecibels((float)xml->getDoubleAttribute("inputGain",  1.0), -24.0f);
+    *pOutputDb     = juce::Decibels::gainToDecibels((float)xml->getDoubleAttribute("outputGain", 1.0), -24.0f);
+    *pGrainMs      = (float)xml->getDoubleAttribute("pitchGrainMs", 30.0);
+    *pFormant      = xml->getBoolAttribute("formantMode", false);
     //--- load snap step; support old preset files that stored an int subdivisions count ---
     if (xml->hasAttribute("snapStepBeats"))
         snapStepBeats = (float)xml->getDoubleAttribute("snapStepBeats", 0.25);
@@ -150,8 +190,50 @@ void EchoGridProcessor::prepareToPlay(double sampleRate, int)
         st.fired        = true;
         st.tape.reset();
         st.pitch.reset();
+        st.formant[0].reset();
+        st.formant[1].reset();
     }
     fallbackBeats = 0.0;
+
+    //--- FORMANT shifter workspace (shared FFT engine, windows, scratch).  sqrt-Hann
+    //    on both analysis and synthesis → product is a Hann window; at 75 % overlap the
+    //    overlap-add of that sums to a constant we divide back out (formantCtx.norm). ---
+    {
+        const int   Nf = FormantShifter::N;
+        const int   Hf = FormantShifter::H;
+        formantFFT = std::make_unique<juce::dsp::FFT>(FormantShifter::kOrder);
+        formantSpec.assign(Nf, {});  formantWork.assign(Nf, {});  formantCeps.assign(Nf, {});
+        formantEnv.assign(Nf / 2 + 1, 0.0f);
+        formantAnaWin.resize(Nf);    formantSynWin.resize(Nf);
+        for (int i = 0; i < Nf; ++i)
+        {
+            const float hann = 0.5f * (1.0f - std::cos(juce::MathConstants<float>::twoPi * (float)i / (float)Nf));
+            formantAnaWin[i] = formantSynWin[i] = std::sqrt(hann);
+        }
+        //--- COLA sum at one output position across the overlapping frames ---
+        float cola = 0.0f;
+        for (int m = 0; m * Hf < Nf; ++m)
+        {
+            const int j = (Nf / 2 + m * Hf) % Nf;
+            cola += formantAnaWin[j] * formantSynWin[j];
+        }
+        formantCtx.fft    = formantFFT.get();
+        formantCtx.ana    = formantAnaWin.data();
+        formantCtx.syn    = formantSynWin.data();
+        formantCtx.norm   = (cola > 1.0e-6f) ? 1.0f / cola : 1.0f;
+        formantCtx.spec   = formantSpec.data();
+        formantCtx.work   = formantWork.data();
+        formantCtx.ceps   = formantCeps.data();
+        formantCtx.env    = formantEnv.data();
+        formantCtx.N      = Nf;
+        //--- two of the three by-ear tuning knobs (see FormantShifter header; the third,
+        //    kFormantRange, lives in processBlock's formant branch).  lifter = envelope
+        //    sharpness: coarser than the pitch comb (which sits at quefrency ~fs/f0, far
+        //    above N/12) so it tracks formants not partials, yet sharp enough to be audible.
+        //    drama = peak/notch depth; 1.0 keeps the move natural, not cartoonish. ---
+        formantCtx.lifter = juce::jmax(8, Nf / 12);
+        formantCtx.drama  = 1.0f;
+    }
 
     //--- seed fired values for the currently active nodes ---
     rerollNodes();
@@ -252,6 +334,21 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 {
     juce::ScopedNoDenormals noDenormals;
 
+    //--- pull the host-automatable global parameters into the plain fields the DSP
+    //    below reads, once per block.  The editor/host write the PARAMETERS; the audio
+    //    thread mirrors them here so the rest of processBlock stays unchanged. ---
+    satDrive          = pDrive->get();
+    hpCutoffHz        = pHpCutoff->get();
+    lpCutoffHz        = pLpCutoff->get();
+    inputGain         = juce::Decibels::decibelsToGain(pInputDb->get(),  -24.0f);
+    outputGain        = juce::Decibels::decibelsToGain(pOutputDb->get(), -24.0f);
+    pitchGrainMs      = pGrainMs->get();
+    formantMode       = pFormant->get();
+    filterDry         = pFilterDry->get();
+    satGlobalOverride = pGlobalDrive->get();
+    dry.gain          = pDryGain->get();
+    dry.pan           = pDryPan->get();
+
     //--- get host BPM + song position (fall back to 120 BPM / free-run) ---
     double bpm          = 120.0;
     double hostPpq      = 0.0;
@@ -288,6 +385,11 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
     //    wrong place (or nowhere).  The pattern downbeat is always a chunk edge. ---
     const double patBeats   = juce::jmax(0.25, (double)gridLengthBeats);
     const double barStart0  = std::floor(songBeats0 / patBeats) * patBeats;
+
+    //--- publish transport position for the editor's grid playhead (message-thread read).
+    //    Only the host position matters here; when stopped we flag it so the playhead hides. ---
+    playheadBeats.store(songBeats0, std::memory_order_relaxed);
+    transportPlaying.store(isPlaying, std::memory_order_relaxed);
 
     //--- minimum reverse window length (~60 ms): the floor that stops a reverse
     //    tap from collapsing into buzz as it approaches the dry.  The window
@@ -514,6 +616,30 @@ void EchoGridProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::Mid
 
                 echoL = delayBuffer.getSample(0, readPos);
                 echoR = (numChannels > 1) ? delayBuffer.getSample(1, readPos) : echoL;
+            }
+            else if (formantMode)
+            {
+                //--- forward echo with FORMANT SHIFT (reached only when formantMode is on
+                //    AND this tap has a non-zero PITCH-layer value — the zero case is
+                //    caught above): frequency-domain envelope warp (see FormantShifter) —
+                //    moves the tap's formants, holds its pitch.  The shifter adds N samples
+                //    of latency, so we read the delay buffer N samples EARLIER (baseOffset -
+                //    latency) and the shifted echo lands back on its beat — plugin latency
+                //    stays 0. ---
+                //--- FORMANT RANGE: maps the PITCH-layer semitones to the formant shift.
+                //    1.0 = a musical ±1 octave at full ±12 (Ableton's formant control is a
+                //    pitch-independent ±100%; ±1 octave is a sane, non-cartoon max).  This
+                //    is the main "how far" knob — raise a touch for more reach, lower if it
+                //    edges toward chipmunk/Donald-Duck at the extremes. ---
+                constexpr float kFormantRange = 1.0f;
+                const float ratio   = std::pow(2.0f, node.pitchSemitones / 12.0f * kFormantRange);
+                const int   readOff = juce::jlimit(1, bufSize - 1,
+                    baseOffset - FormantShifter::latency() + (int)state.timingJitter);
+                const int   readPos = (writePosition - readOff + bufSize) % bufSize;
+                const float inL = delayBuffer.getSample(0, readPos);
+                const float inR = (numChannels > 1) ? delayBuffer.getSample(1, readPos) : inL;
+                echoL = state.formant[0].process(inL, ratio, formantCtx);
+                echoR = (numChannels > 1) ? state.formant[1].process(inR, ratio, formantCtx) : echoL;
             }
             else
             {

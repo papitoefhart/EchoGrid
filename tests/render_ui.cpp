@@ -51,6 +51,15 @@ int main()
     tl.setSize(760, 400);
     writePng(tl, "/private/tmp/echogrid_pitch_overlay.png");
 
+    //--- timeline with the step-sequencer PLAYHEAD lit on a subdivision, to eyeball it ---
+    {
+        juce::UndoManager um3;
+        NodeTimeline tlp(proc, um3);
+        tlp.setSize(760, 400);
+        tlp.setPlayhead(1.5, true);   // beat 2, 3rd sixteenth (matches the mockup)
+        writePng(tlp, "/private/tmp/echogrid_playhead.png");
+    }
+
     //--- inspector alone with a tap selected, to eyeball the new hero / header /
     //    chip / button styling (the offscreen editor has nothing selected) ---
     if (!proc.nodes.empty())

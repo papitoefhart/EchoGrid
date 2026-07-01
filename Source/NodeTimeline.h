@@ -27,6 +27,11 @@ public:
     enum class EditMode { None, Pan, Sat, Pitch };
     void setEditMode(EditMode m) { editMode = m; repaint(); }
 
+    //--- step-sequencer playhead: the editor's timer feeds the host transport position
+    //    here; we snap it to the current subdivision cell and repaint only when that cell
+    //    changes (cheap — no per-frame repaint).  `playing` false hides the playhead. ---
+    void setPlayhead(double songBeats, bool playing);
+
     //--- undo helpers (also called by NodeInspector and PluginEditor) ---
     void captureSnapshot();
     void pushUndoIfChanged();
@@ -75,6 +80,9 @@ private:
 
     //--- overlay edit mode ---
     EditMode editMode = EditMode::None;
+
+    //--- current playhead subdivision index within the grid (-1 = transport stopped) ---
+    int      playheadStep = -1;
 
     //--- pan edit state ---
     int   panDragIdx      = -1;
